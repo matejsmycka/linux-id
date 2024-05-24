@@ -100,8 +100,8 @@ func (pe *Pinentry) prompt(req *request, prompt string) {
 	client, err := pinentry.NewClient(
 		pinentry.WithBinaryName(clientBinary),
 		pinentry.WithDesc(prompt),
-		pinentry.WithTitle("TPM-FIDO"),
-		pinentry.WithPrompt("TPM-FIDO"),
+		pinentry.WithTitle("LINUX-ID"),
+		pinentry.WithPrompt("LINUX-ID"),
 	)
 	if err != nil {
 		sendResult(Result{Error: err})

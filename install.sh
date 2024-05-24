@@ -26,11 +26,11 @@ function autostart() {
         exit 1
     fi
 
-    cat <<EOF >>/home/$USER/.config/autostart/tpm-fido.desktop
+    cat <<EOF >>/home/$USER/.config/autostart/linux-id.desktop
 [Desktop Entry]
-Exec=/usr/local/bin/tpm-fido
+Exec=/usr/local/bin/linux-id
 Icon=
-Name=tpm-fido
+Name=linux-id
 Path=
 Terminal=False
 Type=Application

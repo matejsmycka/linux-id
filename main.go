@@ -13,14 +13,14 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/psanford/tpm-fido/attestation"
-	"github.com/psanford/tpm-fido/fidoauth"
-	"github.com/psanford/tpm-fido/fidohid"
-	"github.com/psanford/tpm-fido/memory"
-	"github.com/psanford/tpm-fido/pinentry"
-	"github.com/psanford/tpm-fido/sitesignatures"
-	"github.com/psanford/tpm-fido/statuscode"
-	"github.com/psanford/tpm-fido/tpm"
+	"github.com/matejsmycka/linux-id/attestation"
+	"github.com/matejsmycka/linux-id/fidoauth"
+	"github.com/matejsmycka/linux-id/fidohid"
+	"github.com/matejsmycka/linux-id/memory"
+	"github.com/matejsmycka/linux-id/pinentry"
+	"github.com/matejsmycka/linux-id/sitesignatures"
+	"github.com/matejsmycka/linux-id/statuscode"
+	"github.com/matejsmycka/linux-id/tpm"
 )
 
 var backend = flag.String("backend", "tpm", "tpm|memory")
@@ -64,13 +64,15 @@ func newServer() *server {
 }
 
 func (s *server) run() {
+	log.Printf("Starting linux-id server")
+
 	ctx := context.Background()
 
 	if pinentry.FindPinentryGUIPath() == "" {
-		log.Printf("warning: no gui pinentry binary detected in PATH. tpm-fido may not work correctly without a gui based pinentry")
+		log.Printf("warning: no gui pinentry binary detected in PATH. linux-id may not work correctly without a gui based pinentry")
 	}
 
-	token, err := fidohid.New(ctx, "tpm-fido")
+	token, err := fidohid.New(ctx, "linux-id")
 	if err != nil {
 		log.Fatalf("create fido hid error: %s", err)
 	}

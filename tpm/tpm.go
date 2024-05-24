@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/google/go-tpm/tpm2"
-	"github.com/psanford/tpm-fido/internal/lencode"
+	"github.com/matejsmycka/linux-id/internal/lencode"
 	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/crypto/cryptobyte/asn1"
 	"golang.org/x/crypto/hkdf"
