@@ -30,7 +30,9 @@ func (m *Mem) Counter() uint32 {
 func (m *Mem) RegisterKey(applicationParam []byte) ([]byte, *big.Int, *big.Int, error) {
 	curve := elliptic.P256()
 
-	childPrivateKey, x, y, err := elliptic.GenerateKey(curve, rand.Reader)
+	childPrivateKey, err := ecdsa.GenerateKey(curve, rand.Reader)
+	x := childPrivateKey.PublicKey.X
+	y := childPrivateKey.PublicKey.Y
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("gen key err: %w", err)
 	}
@@ -47,7 +49,7 @@ func (m *Mem) RegisterKey(applicationParam []byte) ([]byte, *big.Int, *big.Int, 
 	}
 
 	nonce := mustRand(chacha20poly1305.NonceSizeX)
-	encryptedChildPrivateKey := aead.Seal(nil, nonce, childPrivateKey, sum)
+	encryptedChildPrivateKey := aead.Seal(nil, nonce, childPrivateKey.D.Bytes(), sum)
 
 	keyHandle := make([]byte, 0, len(nonce)+len(encryptedChildPrivateKey))
 	keyHandle = append(keyHandle, nonce...)
@@ -87,7 +89,6 @@ func (m *Mem) SignASN1(keyHandle, applicationParam, digest []byte) ([]byte, erro
 
 	ecdsaKey.D = new(big.Int).SetBytes(childPrivateKey)
 	ecdsaKey.PublicKey.Curve = elliptic.P256()
-	ecdsaKey.PublicKey.X, ecdsaKey.PublicKey.Y = ecdsaKey.PublicKey.Curve.ScalarBaseMult(ecdsaKey.D.Bytes())
 
 	return ecdsa.SignASN1(rand.Reader, &ecdsaKey, digest)
 }
