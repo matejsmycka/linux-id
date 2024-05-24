@@ -24,8 +24,9 @@ chmod +x linux-id
 curl https://raw.githubusercontent.com/matejsmycka/linux-id/main/install.sh | bash
 ```
 
+## Test 
 
-
+You can test the installation by visiting [https://demo.yubico.com/webauthn-technical/registration](https://demo.yubico.com/webauthn-technical/registration) and follow fido token enroll and authentication steps.
 
 ## TPM-FIDO
 
