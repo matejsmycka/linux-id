@@ -4,7 +4,7 @@ linux-id is FIDO token implementation for Linux that protects the token keys by 
 
 ## Setup
 
-You can install by running the following commands:s
+You can install by running the following commands:
 
 ```bash 
 git clone git@github.com:matejsmycka/linux-id.git
@@ -17,7 +17,7 @@ chmod +x install.sh
 ```
 
 Or you can download the latest release from the [releases page](
-    
+
 
 ## TPM-FIDO
 
@@ -70,6 +70,7 @@ On an authentication request, linux-id will attempt to load the primary key by i
 ## Dependencies
 
 linux-id requires `pinentry` to be available on the system. If you have gpg installed you most likely already have `pinentry`.
+You will need `go` with version 1.22 or higher (only for compiling).
 
 ## Contributing
 
