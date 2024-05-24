@@ -38,6 +38,7 @@ However, after a discussion with the author, I have decided to create a new repo
 - This project aims to be more accessible to average users.
 - I have updated old methods according to the latest Go standards.
 - Old dependencies (e.g. pinetry) were replaced with updated ones.
+- UX improvements.
 
 ## Future work
 
