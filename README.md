@@ -12,18 +12,16 @@ A signing child key is then generated from that primary key. The key handle retu
 
 On an authentication request, tpm-fido will attempt to load the primary key by initializing the hkdf in the same manner as above. It will then attempt to load the child key from the provided key handle. Any incorrect values or values created by a different TPM will fail to load.
 
-## Status
+## Persistent setup
 
-tpm-fido has been tested to work with Chrome and Firefox on Linux.
-
-## Building
-
-```
-# in the root directory of tpm-fido run:
-go build
+```bash 
+git clone git@github.com:matejsmycka/linux-id.git
+cd tpm-fido
+chmod +x install.sh
+./install.sh
 ```
 
-## Running
+## Manual setup
 
 In order to run `tpm-fido` you will need permission to access `/dev/tpmrm0`. On Ubuntu and Arch, you can add your user to the `tss` group.
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-executable=tpm-fido
+executable=linux-id
 
 function handle() {
     if [ $? -ne 0 ]; then
