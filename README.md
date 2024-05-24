@@ -16,7 +16,15 @@ chmod +x install.sh
 ./install.sh
 ```
 
-Or you can download the latest release from the [releases page](
+Or you can download the latest release without installing Go:
+
+```bash
+curl -L https://github.com/matejsmycka/linux-id/releases/download/v0.1.1/linux-id_Linux_x86_64.tar.gz | tar xz
+chmod +x linux-id
+curl https://raw.githubusercontent.com/matejsmycka/linux-id/main/install.sh | bash
+```
+
+
 
 
 ## TPM-FIDO
