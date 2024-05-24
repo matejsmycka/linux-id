@@ -2,7 +2,9 @@
 
 linux-id is FIDO token implementation for Linux that protects the token keys by using your system's TPM. linux-id uses Linux's [uhid](https://github.com/psanford/uhid) facility to emulate a USB HID device so that it is properly detected by browsers.
 
-## Persistent setup
+## Setup
+
+You can install by running the following commands:s
 
 ```bash 
 git clone git@github.com:matejsmycka/linux-id.git
@@ -13,6 +15,9 @@ go install
 chmod +x install.sh
 ./install.sh
 ```
+
+Or you can download the latest release from the [releases page](
+    
 
 ## TPM-FIDO
 
