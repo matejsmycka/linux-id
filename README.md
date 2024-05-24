@@ -65,3 +65,7 @@ On an authentication request, linux-id will attempt to load the primary key by i
 ## Dependencies
 
 linux-id requires `pinentry` to be available on the system. If you have gpg installed you most likely already have `pinentry`.
+
+## Contributing
+
+Please feel free to open an issue or PR if you have any suggestions or improvements.

@@ -1,0 +1,24 @@
+name: Build
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+jobs:
+    # golang
+    - name: Go
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v2
+        - name: Set up Go
+          uses: actions/setup-go@v2
+          with:
+            go-version: 1.20
+
+        - name: Install dependencies
+          run: go install
+          
+        - name: Build
+          run: go build -v
