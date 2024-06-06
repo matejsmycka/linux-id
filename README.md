@@ -4,7 +4,7 @@ linux-id is FIDO token implementation for Linux that protects the token keys by 
 
 ## Setup
 
-You can install by running the following commands:
+You can install linux-id by running the following commands:
 
 ```bash 
 git clone git@github.com:matejsmycka/linux-id.git
@@ -16,12 +16,13 @@ chmod +x install.sh
 ./install.sh
 ```
 
-Or you can download the latest release without installing Go:
+This will set up Linux-id persistently on your machine; note that this will autostart Linux-id on login.
+
+Or you can skip compiling with the download of the latest release.
 
 ```bash
 curl -L https://github.com/matejsmycka/linux-id/releases/download/v0.1.1/linux-id_Linux_x86_64.tar.gz | tar xz
 chmod +x linux-id
-curl https://raw.githubusercontent.com/matejsmycka/linux-id/main/install.sh | bash
 ```
 
 ## Test 
