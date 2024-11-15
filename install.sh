@@ -66,7 +66,7 @@ fi
 
 sudo usermod -aG tss $USER
 
-handle "Failed to add user to tss group"
+handle "Failed to add a user to tss group, check privileges and if tss group exists"
 
 echo uhid | sudo tee /etc/modules-load.d/uhid.conf
 
