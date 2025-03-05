@@ -3,6 +3,7 @@ package pinentry
 import (
 	"errors"
 	"log"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -141,6 +142,12 @@ func (pe *Pinentry) prompt(req *request, prompt string) {
 }
 
 func FindPinentryGUIPath() string {
+	if path := os.Getenv("PINENTRY_PATH"); path != "" {
+		if p, _ := exec.LookPath(path); p != "" {
+			return p
+		}
+	}
+
 	candidates := []string{
 		"pinentry-gnome3",
 		"pinentry-qt5",
