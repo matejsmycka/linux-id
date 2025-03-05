@@ -6,7 +6,7 @@ linux-id is FIDO token implementation for Linux that protects the token keys by 
 
 You can install linux-id by running the following commands:
 
-```bash 
+```bash
 git clone git@github.com:matejsmycka/linux-id.git
 cd linux-id
 
@@ -25,7 +25,7 @@ curl -L https://github.com/matejsmycka/linux-id/releases/download/v0.1.1/linux-i
 chmod +x linux-id
 ```
 
-## Test 
+## Test
 
 You can test the installation by visiting [https://demo.yubico.com/webauthn-technical/registration](https://demo.yubico.com/webauthn-technical/registration) and follow fido token enroll and authentication steps.
 
@@ -82,6 +82,17 @@ On an authentication request, linux-id will attempt to load the primary key by i
 
 linux-id requires `pinentry` to be available on the system. If you have gpg installed you most likely already have `pinentry`.
 You will need `go` with version 1.22 or higher (only for compiling).
+
+## Known Issues
+
+By default, linux-id tries to find an appropriate pinentry GUI client by checking for various common pinentry implementations. If you encounter issues with pinentry dialogs not appearing or the automatically selected pinentry doesn't work well in your environment, you can specify a specific pinentry binary using the `PINENTRY_PATH` environment variable:
+
+```bash
+# Set a specific pinentry program
+PINENTRY_PATH=/usr/bin/pinentry-qt5 ./linux-id
+```
+
+You can typically find installed pinentry programs by running `ls /usr/bin/pinentry*`.
 
 ## Contributing
 
