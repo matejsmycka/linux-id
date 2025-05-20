@@ -25,20 +25,6 @@ curl -L https://github.com/matejsmycka/linux-id/releases/download/v0.1.4/linux-i
 chmod +x linux-id
 ```
 
-## Manual setup
-
-If `install.sh` does not work for you or you prefer to install manually, you can do so by following these steps:
-
-```bash
-# 1. Compile the code see above
-# 2. Follow the instructions below to set up the uhid module and permissions
-sudo usermod -aG tss $USER
-echo uhid | sudo tee /etc/modules-load.d/uhid.conf
-echo 'KERNEL=="uhid", SUBSYSTEM=="misc", GROUP="users", MODE="0660"' | sudo tee /etc/udev/rules.d/70-uhid.rules
-# 3. Make linux-id executable start automatically on login via systemd or autostart
-# 4. Reboot
-```
-
 ## Test
 
 You can test the installation by visiting [https://demo.yubico.com/webauthn-technical/registration](https://demo.yubico.com/webauthn-technical/registration) and follow fido token enroll and authentication steps.
@@ -81,6 +67,7 @@ To run:
 ```
 Note: do not run with `sudo` or as root, as it will not work.
 
+Make linux-id executable start automatically on login via systemd or autostart.
 
 ##  Implementation details
 
