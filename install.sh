@@ -26,6 +26,11 @@ function autostart() {
         exit 1
     fi
 
+    if [ ! -d /home/$USER/.config/autostart ]; then
+        mkdir -p /home/$USER/.config/autostart
+        handle "Failed to create autostart directory"
+    fi
+
     cat <<EOF >>/home/$USER/.config/autostart/linux-id.desktop
 [Desktop Entry]
 Exec=/usr/local/bin/linux-id

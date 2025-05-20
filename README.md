@@ -1,6 +1,6 @@
-# linux-id
+# Linux-id
 
-linux-id is FIDO token implementation for Linux that protects the token keys by using your system's TPM. linux-id uses Linux's [uhid](https://github.com/psanford/uhid) facility to emulate a USB HID device so that it is properly detected by browsers.
+Linux-id is FIDO token implementation for Linux that protects the token keys by using your system's TPM. linux-id uses Linux's [uhid](https://github.com/psanford/uhid) facility to emulate a USB HID device so that it is properly detected by browsers.
 
 ## Setup
 
@@ -21,8 +21,22 @@ This will set up Linux-id persistently on your machine; note that this will auto
 Or you can skip compiling with the download of the latest release.
 
 ```bash
-curl -L https://github.com/matejsmycka/linux-id/releases/download/v0.1.3/linux-id_Linux_x86_64.tar.gz | tar xz
+curl -L https://github.com/matejsmycka/linux-id/releases/download/v0.1.4/linux-id_Linux_x86_64.tar.gz | tar xz
 chmod +x linux-id
+```
+
+## Manual setup
+
+If `install.sh` does not work for you or you prefer to install manually, you can do so by following these steps:
+
+```bash
+# 1. Compile the code see above
+# 2. Follow the instructions below to set up the uhid module and permissions
+sudo usermod -aG tss $USER
+echo uhid | sudo tee /etc/modules-load.d/uhid.conf
+echo 'KERNEL=="uhid", SUBSYSTEM=="misc", GROUP="users", MODE="0660"' | sudo tee /etc/udev/rules.d/70-uhid.rules
+# 3. Make linux-id executable start automatically on login via systemd or autostart
+# 4. Reboot
 ```
 
 ## Test
