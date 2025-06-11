@@ -108,7 +108,11 @@ func (s *server) run() {
 }
 
 func (s *server) handleVersion(parentCtx context.Context, token *fidohid.SoftToken, evt fidohid.AuthEvent) {
-	token.WriteResponse(parentCtx, evt, []byte("U2F_V2"), statuscode.NoError)
+	log.Printf("Sending version 'U2F_V2' for CTAP1/U2F compatibility")
+	if err := token.WriteResponse(parentCtx, evt, []byte("U2F_V2"), statuscode.NoError); err != nil {
+		log.Printf("write version response err: %s", err)
+		return
+	}
 }
 
 func (s *server) handleAuthenticate(parentCtx context.Context, token *fidohid.SoftToken, evt fidohid.AuthEvent) {
