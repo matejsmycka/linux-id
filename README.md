@@ -21,7 +21,7 @@ This will set up Linux-id persistently on your machine; note that this will auto
 Or you can skip compiling with the download of the latest release.
 
 ```bash
-curl -L https://github.com/matejsmycka/linux-id/releases/download/v0.1.4/linux-id_Linux_x86_64.tar.gz | tar xz
+curl -L https://github.com/matejsmycka/linux-id/releases/download/v0.1.5/linux-id_Linux_x86_64.tar.gz | tar xz
 chmod +x linux-id
 ```
 
