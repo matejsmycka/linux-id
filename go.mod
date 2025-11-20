@@ -8,7 +8,7 @@ require (
 	github.com/google/go-tpm v0.9.7
 	github.com/psanford/uhid v0.0.0-20210516231035-a7c1e481958d
 	github.com/twpayne/go-pinentry/v4 v4.0.0
-	golang.org/x/crypto v0.44.0
+	golang.org/x/crypto v0.45.0
 )
 
 require golang.org/x/sys v0.38.0 // indirect
