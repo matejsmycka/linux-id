@@ -13,8 +13,8 @@ github.com/psanford/uhid v0.0.0-20210516231035-a7c1e481958d h1:dTFeS1I1nq6RGwQJ6
 github.com/psanford/uhid v0.0.0-20210516231035-a7c1e481958d/go.mod h1:l7AmGL56H606RdpAQZ3qizn5ur7SoO9uQA2ZT7ZJ4RI=
 github.com/twpayne/go-pinentry/v4 v4.0.0 h1:8WcNa+UDVRzz7y9OEEU/nRMX+UGFPCAvl5XsqWRxTY4=
 github.com/twpayne/go-pinentry/v4 v4.0.0/go.mod h1:aXvy+awVXqdH+GS0ddQ7AKHZ3tXM6fJ2NK+e16p47PI=
-golang.org/x/crypto v0.44.0 h1:A97SsFvM3AIwEEmTBiaxPPTYpDC47w720rdiiUvgoAU=
-golang.org/x/crypto v0.44.0/go.mod h1:013i+Nw79BMiQiMsOPcVCB5ZIJbYkerPrGnOa00tvmc=
+golang.org/x/crypto v0.45.0 h1:jMBrvKuj23MTlT0bQEOBcAE0mjg8mK9RXFhRH6nyF3Q=
+golang.org/x/crypto v0.45.0/go.mod h1:XTGrrkGJve7CYK7J8PEww4aY7gM3qMCElcJQ8n8JdX4=
 golang.org/x/sys v0.0.0-20200909081042-eff7692f9009/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
 golang.org/x/sys v0.38.0 h1:3yZWxaJjBmCWXqhN1qh02AkOnCQ1poK6oF+a7xWL6Gc=
 golang.org/x/sys v0.38.0/go.mod h1:OgkHotnGiDImocRcuBABYBEXf8A9a87e/uXjp9XT3ks=
