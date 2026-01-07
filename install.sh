@@ -77,7 +77,9 @@ handle "Failed to add a user to tss group, check privileges and if tss group exi
 echo uhid | sudo tee /etc/modules-load.d/uhid.conf
 handle "Failed to add uhid to modules"
 
-echo 'KERNEL=="uhid", SUBSYSTEM=="misc", GROUP="users", MODE="0660"' | sudo tee /etc/udev/rules.d/70-uhid.rules
+if ! grep 'KERNEL=="uhid", SUBSYSTEM=="misc", GROUP="users", MODE="0660"' /etc/udev/rules.d/70-uhid.rules &>/dev/null; then
+    echo 'KERNEL=="uhid", SUBSYSTEM=="misc", GROUP="users", MODE="0660"' | sudo tee -a /etc/udev/rules.d/70-uhid.rules
+fi
 
 autostart
 
