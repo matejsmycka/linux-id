@@ -11,8 +11,8 @@ function handle() {
 
 function make_executable() {
     go build -o $executable \
-        || podman run --rm -v "$PWD:/workdir:Z" -w "/workdir" golang:1 go build -o $executable \
-        || docker run --rm -v "$PWD:/workdir" -w "/workdir" golang:1 go build -o $executable 
+        || podman run --rm -v "$PWD:/workdir:Z" -w "/workdir" golang:latest go build -o $executable \
+        || docker run --rm -v "$PWD:/workdir" -w "/workdir" golang:latest go build -o $executable 
     handle "Failed to build executable"
     chmod +x $executable
     handle "Failed to make executable"
