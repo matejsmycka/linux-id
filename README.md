@@ -10,8 +10,6 @@ You can install linux-id by running the following commands:
 git clone git@github.com:matejsmycka/linux-id.git
 cd linux-id
 
-go install
-
 chmod +x install.sh
 ./install.sh
 ```
@@ -82,7 +80,12 @@ On an authentication request, linux-id will attempt to load the primary key by i
 ## Dependencies
 
 linux-id requires `pinentry` to be available on the system. If you have gpg installed you most likely already have `pinentry`.
-You will need `go` with version 1.22 or higher (only for compiling).
+
+You will need one of the following (only for compiling):
+
+- `go` with version 1.22 or higher.
+- `podman` to compile in a container.
+- `docker` to compile in a container.
 
 ## Known Issues
 
@@ -98,3 +101,4 @@ You can typically find installed pinentry programs by running `ls /usr/bin/pinen
 ## Contributing
 
 Please feel free to open an issue or PR if you have any suggestions or improvements.
+

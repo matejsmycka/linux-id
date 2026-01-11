@@ -10,7 +10,9 @@ function handle() {
 }
 
 function make_executable() {
-    go build -o $executable
+    go build -o $executable \
+        || podman run --rm -v "$PWD:/workdir:Z" -w "/workdir" golang:latest go build -o $executable \
+        || docker run --rm -v "$PWD:/workdir" -w "/workdir" golang:latest go build -o $executable 
     handle "Failed to build executable"
     chmod +x $executable
     handle "Failed to make executable"
@@ -49,8 +51,8 @@ function check_prereqs() {
         exit 1
     fi
 
-    if ! command -v go &>/dev/null; then
-        echo "Go is not installed, please install it"
+    if ! command -v go podman docker &>/dev/null; then
+        echo "Go/Podman/Docker is not installed, please install one of them"
         exit 1
     fi
 
@@ -70,14 +72,14 @@ else
 fi
 
 sudo usermod -aG tss $USER
-
 handle "Failed to add a user to tss group, check privileges and if tss group exists"
 
 echo uhid | sudo tee /etc/modules-load.d/uhid.conf
-
 handle "Failed to add uhid to modules"
 
-echo 'KERNEL=="uhid", SUBSYSTEM=="misc", GROUP="users", MODE="0660"' | sudo tee /etc/udev/rules.d/70-uhid.rules
+if ! grep 'KERNEL=="uhid", SUBSYSTEM=="misc", GROUP="users", MODE="0660"' /etc/udev/rules.d/70-uhid.rules &>/dev/null; then
+    echo 'KERNEL=="uhid", SUBSYSTEM=="misc", GROUP="users", MODE="0660"' | sudo tee -a /etc/udev/rules.d/70-uhid.rules
+fi
 
 autostart
 
