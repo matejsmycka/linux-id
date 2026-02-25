@@ -149,11 +149,11 @@ func FindPinentryGUIPath() string {
 	}
 
 	candidates := []string{
-		"pinentry-gnome3",
+		"pinentry",
+		"pinentry-gtk",
+		"pinentry-qt",
 		"pinentry-qt5",
 		"pinentry-qt4",
-		"pinentry-qt",
-		"pinentry-gtk-2",
 		"pinentry-x11",
 		"pinentry-fltk",
 	}
