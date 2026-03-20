@@ -13,9 +13,12 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/matejsmycka/linux-id/attestation"
+	cbor "github.com/fxamacker/cbor/v2"
+	"github.com/matejsmycka/linux-id/attestation" // used for CTAP1 registerSite
+	"github.com/matejsmycka/linux-id/ctap2"
 	"github.com/matejsmycka/linux-id/fidoauth"
 	"github.com/matejsmycka/linux-id/fidohid"
+	"github.com/matejsmycka/linux-id/fprintd"
 	"github.com/matejsmycka/linux-id/memory"
 	"github.com/matejsmycka/linux-id/pinentry"
 	"github.com/matejsmycka/linux-id/sitesignatures"
@@ -25,6 +28,7 @@ import (
 
 var backend = flag.String("backend", "tpm", "tpm|memory")
 var device = flag.String("device", "/dev/tpmrm0", "TPM device path")
+var auth = flag.String("auth", "pinentry", "pinentry|fprintd — pinentry confirms presence (UP only); fprintd verifies identity via fingerprint (UP+UV)")
 
 func main() {
 	flag.Parse()
@@ -32,9 +36,55 @@ func main() {
 	s.run()
 }
 
+// VerifyResult is the outcome of a user verification attempt.
+type VerifyResult struct {
+	OK    bool
+	Error error
+}
+
+// UserVerifier abstracts over user confirmation methods for CTAP2.
+// pinentry provides User Presence (UP); fprintd provides User Verification (UV).
+type UserVerifier interface {
+	// VerifyUser starts verification and returns a result channel.
+	VerifyUser(prompt string) (<-chan VerifyResult, error)
+	// PerformsUV returns true only when the verifier actually identifies the user
+	// (e.g. fingerprint). Used to set the UV flag in authenticatorData honestly.
+	PerformsUV() bool
+}
+
+type pinentryVerifier struct{ pe *pinentry.Pinentry }
+
+func (v *pinentryVerifier) VerifyUser(prompt string) (<-chan VerifyResult, error) {
+	ch, err := v.pe.ConfirmGeneric(prompt)
+	if err != nil {
+		return nil, err
+	}
+	out := make(chan VerifyResult, 1)
+	go func() { r := <-ch; out <- VerifyResult{OK: r.OK, Error: r.Error} }()
+	return out, nil
+}
+
+func (v *pinentryVerifier) PerformsUV() bool { return false }
+
+type fprintdVerifier struct{ fp *fprintd.Fprintd }
+
+func (v *fprintdVerifier) VerifyUser(prompt string) (<-chan VerifyResult, error) {
+	ch, err := v.fp.VerifyPresence()
+	if err != nil {
+		return nil, err
+	}
+	out := make(chan VerifyResult, 1)
+	go func() { r := <-ch; out <- VerifyResult{OK: r.OK, Error: r.Error} }()
+	return out, nil
+}
+
+func (v *fprintdVerifier) PerformsUV() bool { return true }
+
 type server struct {
-	pe     *pinentry.Pinentry
-	signer Signer
+	pe       *pinentry.Pinentry // CTAP1/U2F — browser-retry dedup via challenge params
+	verifier UserVerifier       // CTAP2 — configured via --auth flag
+	signer   Signer
+	cs       *ctap2.CredStore
 }
 
 type Signer interface {
@@ -44,9 +94,19 @@ type Signer interface {
 }
 
 func newServer() *server {
+	pe := pinentry.New()
 	s := server{
-		pe: pinentry.New(),
+		pe: pe,
+		cs: ctap2.NewCredStore(),
 	}
+
+	switch *auth {
+	case "fprintd":
+		s.verifier = &fprintdVerifier{fp: fprintd.New()}
+	default:
+		s.verifier = &pinentryVerifier{pe: pe}
+	}
+
 	if *backend == "tpm" {
 		signer, err := tpm.New(*device)
 		if err != nil {
@@ -64,11 +124,11 @@ func newServer() *server {
 }
 
 func (s *server) run() {
-	log.Printf("Starting linux-id server")
+	log.Printf("Starting linux-id server (auth=%s)", *auth)
 
 	ctx := context.Background()
 
-	if pinentry.FindPinentryGUIPath() == "" {
+	if *auth == "pinentry" && pinentry.FindPinentryGUIPath() == "" {
 		log.Printf("warning: no gui pinentry binary detected in PATH. linux-id may not work correctly without a gui based pinentry")
 	}
 
@@ -80,8 +140,14 @@ func (s *server) run() {
 	go token.Run(ctx)
 
 	for evt := range token.Events() {
+		// Route CTAP2 (CmdCbor) events before accessing evt.Req.
+		if evt.RawCbor != nil {
+			s.handleCtap2(ctx, token, evt)
+			continue
+		}
+
 		if evt.Error != nil {
-			log.Printf("got token error: %s", err)
+			log.Printf("got token error: %s", evt.Error)
 			continue
 		}
 
@@ -89,7 +155,6 @@ func (s *server) run() {
 
 		if req.Command == fidoauth.CmdAuthenticate {
 			log.Printf("got AuthenticateCmd site=%s", sitesignatures.FromAppParam(req.Authenticate.ApplicationParam))
-
 			s.handleAuthenticate(ctx, token, evt)
 		} else if req.Command == fidoauth.CmdRegister {
 			log.Printf("got RegisterCmd site=%s", sitesignatures.FromAppParam(req.Register.ApplicationParam))
@@ -319,6 +384,336 @@ func (s *server) registerSite(ctx context.Context, token *fidohid.SoftToken, evt
 		log.Printf("write register response err: %s", err)
 		return
 	}
+}
+
+// handleCtap2 dispatches incoming CTAP2 (CmdCbor) events.
+func (s *server) handleCtap2(ctx context.Context, token *fidohid.SoftToken, evt fidohid.AuthEvent) {
+	if len(evt.RawCbor) == 0 {
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusInvalidCbor, nil)
+		return
+	}
+	cmd, payload := evt.RawCbor[0], evt.RawCbor[1:]
+	switch cmd {
+	case ctap2.CmdGetInfo:
+		s.handleGetInfo(ctx, token, evt)
+	case ctap2.CmdMakeCredential:
+		s.handleMakeCredential(ctx, token, evt, payload)
+	case ctap2.CmdGetAssertion:
+		s.handleGetAssertion(ctx, token, evt, payload)
+	default:
+		log.Printf("unsupported CTAP2 cmd 0x%02x", cmd)
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusNotAllowed, nil)
+	}
+}
+
+// handleGetInfo returns CTAP2 authenticator capabilities.
+// The UV option is honest: true only when using fprintd (actual identity verification).
+func (s *server) handleGetInfo(ctx context.Context, token *fidohid.SoftToken, evt fidohid.AuthEvent) {
+	log.Print("got Ctap2Cmd GetInfo")
+
+	options := map[string]bool{
+		"rk": true,
+		"up": true,
+		"uv": s.verifier.PerformsUV(),
+	}
+
+	response := map[int]interface{}{
+		1: []string{"FIDO_2_0", "U2F_V2"},
+		3: make([]byte, 16), // AAGUID: 16 zero bytes (uncertified)
+		4: options,
+		5: 1200, // maxMsgSize
+	}
+	encoded, err := cbor.Marshal(response)
+	if err != nil {
+		log.Printf("GetInfo marshal err: %s", err)
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusInvalidCbor, nil)
+		return
+	}
+	token.WriteCtap2Response(ctx, evt, ctap2.StatusOK, encoded)
+}
+
+// handleMakeCredential implements CTAP2 authenticatorMakeCredential (passkey registration).
+func (s *server) handleMakeCredential(ctx context.Context, token *fidohid.SoftToken, evt fidohid.AuthEvent, payload []byte) {
+	log.Print("got Ctap2Cmd MakeCredential")
+
+	var req ctap2.MakeCredentialRequest
+	if err := cbor.Unmarshal(payload, &req); err != nil {
+		log.Printf("MakeCredential decode err: %s", err)
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusInvalidCbor, nil)
+		return
+	}
+
+	if len(req.ClientDataHash) != 32 {
+		log.Printf("MakeCredential: invalid clientDataHash length %d", len(req.ClientDataHash))
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusInvalidCbor, nil)
+		return
+	}
+
+	// Verify at least one supported algorithm (ES256 = -7).
+	hasES256 := false
+	for _, p := range req.PubKeyCredParams {
+		if p.Alg == -7 {
+			hasES256 = true
+			break
+		}
+	}
+	if !hasES256 {
+		log.Print("MakeCredential: no ES256 in pubKeyCredParams")
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusUnsupportedAlg, nil)
+		return
+	}
+
+	// If the RP requests uv=true but our verifier only provides user presence, reject.
+	if req.Options != nil && req.Options.UV && !s.verifier.PerformsUV() {
+		log.Print("MakeCredential: uv=true requested but verifier cannot verify identity")
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusInvalidOption, nil)
+		return
+	}
+
+	rpIdHash := sha256.Sum256([]byte(req.RP.ID))
+
+	// Per spec §6.1: user presence MUST be obtained before checking excludeList.
+	// Checking after UP prevents timing attacks that reveal credential existence
+	// without user consent.
+	resultCh, err := s.verifier.VerifyUser("FIDO2 Register: " + req.RP.ID)
+	if err != nil {
+		log.Printf("MakeCredential verifier err: %s", err)
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
+		return
+	}
+	childCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
+	defer cancel()
+	select {
+	case result := <-resultCh:
+		if !result.OK {
+			if result.Error != nil {
+				log.Printf("MakeCredential verifier result err: %s", result.Error)
+			}
+			token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
+			return
+		}
+	case <-childCtx.Done():
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusUserActionTimeout, nil)
+		return
+	}
+
+	// Check excludeList after UP: if a credential already exists for this RP, reject.
+	if len(req.ExcludeList) > 0 {
+		dummySig := sha256.Sum256([]byte("meticulously-Bacardi"))
+		for _, cred := range req.ExcludeList {
+			if _, err := s.signer.SignASN1(cred.ID, rpIdHash[:], dummySig[:]); err == nil {
+				log.Printf("MakeCredential: credential already exists for rp=%s", req.RP.ID)
+				token.WriteCtap2Response(ctx, evt, ctap2.StatusCredentialExcluded, nil)
+				return
+			}
+		}
+	}
+
+	keyHandle, x, y, err := s.signer.RegisterKey(rpIdHash[:])
+	if err != nil {
+		log.Printf("MakeCredential RegisterKey err: %s", err)
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
+		return
+	}
+
+	// Build COSE EC public key (integer map keys per RFC 8152).
+	xBytes := make([]byte, 32)
+	yBytes := make([]byte, 32)
+	x.FillBytes(xBytes)
+	y.FillBytes(yBytes)
+	coseKey := map[int]interface{}{
+		1:  2,      // kty: EC2
+		3:  -7,     // alg: ES256
+		-1: 1,      // crv: P-256
+		-2: xBytes, // x
+		-3: yBytes, // y
+	}
+	coseKeyBytes, err := cbor.Marshal(coseKey)
+	if err != nil {
+		log.Printf("MakeCredential coseKey marshal err: %s", err)
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
+		return
+	}
+
+	// authenticatorData: rpIdHash(32) | flags(1) | signCount(4) | AAGUID(16) | credIdLen(2) | credId | coseKey
+	// UV flag is set only when the verifier actually verified the user's identity.
+	authFlags := ctap2.AuthFlagUP | ctap2.AuthFlagAT
+	if s.verifier.PerformsUV() {
+		authFlags |= ctap2.AuthFlagUV
+	}
+
+	var authDataBuf bytes.Buffer
+	authDataBuf.Write(rpIdHash[:])
+	authDataBuf.WriteByte(authFlags)
+	binary.Write(&authDataBuf, binary.BigEndian, s.signer.Counter())
+	authDataBuf.Write(make([]byte, 16)) // AAGUID: 16 zero bytes
+	binary.Write(&authDataBuf, binary.BigEndian, uint16(len(keyHandle)))
+	authDataBuf.Write(keyHandle)
+	authDataBuf.Write(coseKeyBytes)
+	authDataBytes := authDataBuf.Bytes()
+
+	// Use "none" attestation: we have no hardware cert chain to present,
+	// and returning the shared SoftU2F cert causes servers to reject the credential.
+	response := map[int]interface{}{
+		1: "none",
+		2: authDataBytes,
+		3: map[interface{}]interface{}{},
+	}
+	encoded, err := cbor.Marshal(response)
+	if err != nil {
+		log.Printf("MakeCredential response marshal err: %s", err)
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
+		return
+	}
+
+	// Persist as resident credential if rk option is set.
+	if req.Options != nil && req.Options.RK {
+		err := s.cs.Save(ctap2.StoredCredential{
+			CredID:      keyHandle,
+			RPIDHash:    rpIdHash[:],
+			RPID:        req.RP.ID,
+			RPName:      req.RP.Name,
+			UserID:      req.User.ID,
+			UserName:    req.User.Name,
+			DisplayName: req.User.DisplayName,
+		})
+		if err != nil {
+			log.Printf("MakeCredential credstore save err: %s", err)
+		}
+	}
+
+	log.Printf("MakeCredential ok: rp=%s keyHandle=%d bytes", req.RP.ID, len(keyHandle))
+	token.WriteCtap2Response(ctx, evt, ctap2.StatusOK, encoded)
+}
+
+// handleGetAssertion implements CTAP2 authenticatorGetAssertion (passkey authentication).
+func (s *server) handleGetAssertion(ctx context.Context, token *fidohid.SoftToken, evt fidohid.AuthEvent, payload []byte) {
+	log.Print("got Ctap2Cmd GetAssertion")
+
+	var req ctap2.GetAssertionRequest
+	if err := cbor.Unmarshal(payload, &req); err != nil {
+		log.Printf("GetAssertion decode err: %s", err)
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusInvalidCbor, nil)
+		return
+	}
+
+	if len(req.ClientDataHash) != 32 {
+		log.Printf("GetAssertion: invalid clientDataHash length %d", len(req.ClientDataHash))
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusInvalidCbor, nil)
+		return
+	}
+
+	// If the RP requests uv=true but our verifier only provides user presence, reject.
+	if req.Options != nil && req.Options.UV && !s.verifier.PerformsUV() {
+		log.Print("GetAssertion: uv=true requested but verifier cannot verify identity")
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusInvalidOption, nil)
+		return
+	}
+
+	rpIdHash := sha256.Sum256([]byte(req.RPID))
+
+	// Resolve credential: allowList takes priority over resident credentials.
+	var keyHandle []byte
+	var storedCred *ctap2.StoredCredential
+	if len(req.AllowList) > 0 {
+		// Validate the key handle before prompting the user.
+		dummySig := sha256.Sum256([]byte("meticulously-Bacardi"))
+		for _, cred := range req.AllowList {
+			if _, err := s.signer.SignASN1(cred.ID, rpIdHash[:], dummySig[:]); err == nil {
+				keyHandle = cred.ID
+				break
+			}
+		}
+		if keyHandle == nil {
+			log.Printf("GetAssertion: no valid key handle in allowList for rp=%s", req.RPID)
+			token.WriteCtap2Response(ctx, evt, ctap2.StatusNoCredentials, nil)
+			return
+		}
+	} else {
+		creds, err := s.cs.FindByRPID(rpIdHash[:])
+		if err != nil {
+			log.Printf("GetAssertion credstore err: %s", err)
+			token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
+			return
+		}
+		if len(creds) == 0 {
+			log.Printf("GetAssertion: no credentials for rp=%s", req.RPID)
+			token.WriteCtap2Response(ctx, evt, ctap2.StatusNoCredentials, nil)
+			return
+		}
+		storedCred = &creds[0]
+		keyHandle = storedCred.CredID
+	}
+
+	resultCh, err := s.verifier.VerifyUser("FIDO2 Authenticate: " + req.RPID)
+	if err != nil {
+		log.Printf("GetAssertion verifier err: %s", err)
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
+		return
+	}
+	childCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
+	defer cancel()
+	select {
+	case result := <-resultCh:
+		if !result.OK {
+			if result.Error != nil {
+				log.Printf("GetAssertion verifier result err: %s", result.Error)
+			}
+			token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
+			return
+		}
+	case <-childCtx.Done():
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusUserActionTimeout, nil)
+		return
+	}
+
+	// authenticatorData: rpIdHash(32) | flags(1) | signCount(4)
+	// UV flag is set only when the verifier actually verified the user's identity.
+	authFlags := ctap2.AuthFlagUP
+	if s.verifier.PerformsUV() {
+		authFlags |= ctap2.AuthFlagUV
+	}
+
+	var authDataBuf bytes.Buffer
+	authDataBuf.Write(rpIdHash[:])
+	authDataBuf.WriteByte(authFlags)
+	binary.Write(&authDataBuf, binary.BigEndian, s.signer.Counter())
+	authDataBytes := authDataBuf.Bytes()
+
+	// Sign sha256(authData || clientDataHash) per WebAuthn §7.2.
+	toSign := make([]byte, len(authDataBytes)+len(req.ClientDataHash))
+	copy(toSign, authDataBytes)
+	copy(toSign[len(authDataBytes):], req.ClientDataHash)
+	digest := sha256.Sum256(toSign)
+
+	sig, err := s.signer.SignASN1(keyHandle, rpIdHash[:], digest[:])
+	if err != nil {
+		log.Printf("GetAssertion sign err: %s", err)
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
+		return
+	}
+
+	response := map[int]interface{}{
+		1: map[string]interface{}{"type": "public-key", "id": keyHandle},
+		2: authDataBytes,
+		3: sig,
+	}
+	if storedCred != nil {
+		response[4] = map[string]interface{}{
+			"id":          storedCred.UserID,
+			"name":        storedCred.UserName,
+			"displayName": storedCred.DisplayName,
+		}
+	}
+	encoded, err := cbor.Marshal(response)
+	if err != nil {
+		log.Printf("GetAssertion response marshal err: %s", err)
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
+		return
+	}
+
+	log.Printf("GetAssertion ok: rp=%s", req.RPID)
+	token.WriteCtap2Response(ctx, evt, ctap2.StatusOK, encoded)
 }
 
 func mustRand(size int) []byte {
