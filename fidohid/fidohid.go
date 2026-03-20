@@ -3,7 +3,6 @@ package fidohid
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -41,16 +40,15 @@ type SoftToken struct {
 	device    *uhid.Device
 	evtChan   chan uhid.Event
 	authEvent chan AuthEvent
-
-	authFunc func()
 }
 
 type AuthEvent struct {
 	chanID uint32
 	cmd    CmdType
 
-	Req   *fidoauth.AuthenticatorRequest
-	Error error
+	Req     *fidoauth.AuthenticatorRequest
+	RawCbor []byte // non-nil iff this is a CTAP2 (CmdCbor) event
+	Error   error
 }
 
 func (t *SoftToken) Events() chan AuthEvent {
@@ -127,6 +125,17 @@ func (t *SoftToken) Run(ctx context.Context) {
 				Error:  err,
 			}
 
+			select {
+			case t.authEvent <- evt:
+			case <-ctx.Done():
+				return
+			}
+		case CmdCbor:
+			cbor := innerMsg
+			if cbor == nil {
+				cbor = []byte{}
+			}
+			evt := AuthEvent{chanID: reqChanID, cmd: cmd, RawCbor: cbor}
 			select {
 			case t.authEvent <- evt:
 			case <-ctx.Done():
@@ -338,10 +347,6 @@ type packetReader struct {
 	err error
 }
 
-func (r *packetReader) Error() error {
-	return r.err
-}
-
 func (pr *packetReader) Read(order binary.ByteOrder, data interface{}) error {
 	if pr.err != nil {
 		return pr.err
@@ -365,15 +370,6 @@ func (pr *packetReader) ReadFull(b []byte) (int, error) {
 		return n, err
 	}
 	return n, nil
-}
-
-func mustRand(size int) []byte {
-	b := make([]byte, size)
-	if _, err := rand.Read(b); err != nil {
-		panic(err)
-	}
-
-	return b
 }
 
 type frameInit struct {
@@ -434,7 +430,7 @@ func newInitResponse(channelID uint32, nonce [8]byte) *initResponse {
 		MajorDeviceVersion: deviceMajor,
 		MinorDeviceVersion: deviceMinor,
 		BuildDeviceVersion: deviceBuild,
-		// RawCapabilities:    winkCapability,
+		RawCapabilities: cborCapability,
 	}
 }
 
@@ -455,6 +451,13 @@ func (resp *initResponse) Marshal() []byte {
 
 func (t *SoftToken) WriteResponse(ctx context.Context, evt AuthEvent, data []byte, status uint16) error {
 	return writeRespose(t.device, evt.chanID, evt.cmd, data, status)
+}
+
+// WriteCtap2Response sends a CTAP2 response: [1-byte status] + [CBOR payload].
+// No trailing U2F status word is appended.
+func (t *SoftToken) WriteCtap2Response(ctx context.Context, evt AuthEvent, status byte, data []byte) error {
+	payload := append([]byte{status}, data...)
+	return writeRespose(t.device, evt.chanID, CmdCbor, payload, 0)
 }
 
 func writeRespose(d *uhid.Device, chanID uint32, cmd CmdType, data []byte, status uint16) error {

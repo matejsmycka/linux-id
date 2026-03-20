@@ -18,8 +18,6 @@ const (
 type AuthenticatorRequest struct {
 	Command uint8
 	Param1  uint8
-	Param2  uint8
-	Size    int
 	Data    []byte
 
 	Register     *AuthenticatorRegisterReq
@@ -53,8 +51,6 @@ func DecodeAuthenticatorRequest(raw []byte) (*AuthenticatorRequest, error) {
 	req := AuthenticatorRequest{
 		Command: raw[1],
 		Param1:  raw[2],
-		Param2:  raw[3],
-		Size:    (int(raw[4]) << 16) | (int(raw[5]) << 8) | int(raw[6]),
 		Data:    raw[7:],
 	}
 

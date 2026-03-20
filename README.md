@@ -39,9 +39,26 @@ However, after a discussion with the author, I have decided to create a new repo
 - Old dependencies (e.g. pinetry) were replaced with updated ones.
 - UX improvements.
 
+## CTAP2 / Passkeys
+
+linux-id supports CTAP2 in addition to CTAP1/U2F, enabling passkey registration and authentication.
+
+Use `--auth fprintd` for fingerprint authentication (sets UV flag, required by some sites); the default `pinentry` mode shows a click dialog but does not set UV.
+
+To use fingerprint authentication, run:
+
+```bash
+./linux-id --auth fprintd
+```
+
+`fprintd` must be installed and your fingerprint enrolled via `fprintd-enroll`.
+
+### Resident credentials
+
+When a site requests `rk=true` (resident key), linux-id stores the credential locally at `~/.config/linux-id/creds.json`.
+
 ## Future work
 
-- [ ] Add support for fingerprint and PIN authentication
 - [ ] Add to linux distro package managers
 
 ## Manual setup
@@ -81,13 +98,15 @@ On an authentication request, linux-id will attempt to load the primary key by i
 
 linux-id requires `pinentry` to be available on the system. If you have gpg installed you most likely already have `pinentry`.
 
+For fingerprint authentication (`--auth fprintd`), `fprintd` must be installed and running.
+
 You will need one of the following (only for compiling):
 
 - `go` with version 1.22 or higher.
 - `podman` to compile in a container.
 - `docker` to compile in a container.
 
-## Known Issues
+## Pinentry configuration
 
 By default, linux-id tries to find an appropriate pinentry GUI client by checking for various common pinentry implementations. If you encounter issues with pinentry dialogs not appearing or the automatically selected pinentry doesn't work well in your environment, you can specify a specific pinentry binary using the `PINENTRY_PATH` environment variable:
 

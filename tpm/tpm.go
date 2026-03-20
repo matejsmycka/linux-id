@@ -10,7 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/go-tpm/legacy/tpm2"
+	tpm2 "github.com/google/go-tpm/tpm2"
+	"github.com/google/go-tpm/tpm2/transport"
+	"github.com/google/go-tpm/tpm2/transport/linuxtpm"
 	"github.com/matejsmycka/linux-id/internal/lencode"
 	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/crypto/cryptobyte/asn1"
@@ -27,8 +29,8 @@ type TPM struct {
 	mu         sync.Mutex
 }
 
-func (t *TPM) open() (io.ReadWriteCloser, error) {
-	return tpm2.OpenTPM(t.devicePath)
+func (t *TPM) open() (transport.TPMCloser, error) {
+	return linuxtpm.Open(t.devicePath)
 }
 
 func New(devicePath string) (*TPM, error) {
@@ -36,45 +38,57 @@ func New(devicePath string) (*TPM, error) {
 		devicePath: devicePath,
 	}
 
-	tpm, err := t.open()
+	tpmConn, err := t.open()
 	if err != nil {
 		return nil, err
 	}
-	tpm.Close()
+	tpmConn.Close()
 
 	return t, nil
 }
 
-func primaryKeyTmpl(seed, applicationParam []byte) tpm2.Public {
+func primaryKeyTmpl(seed, applicationParam []byte) tpm2.TPMTPublic {
 	info := append([]byte("tpm-fido-application-key"), applicationParam...)
 
 	r := hkdf.New(sha256.New, seed, []byte{}, info)
-	unique := tpm2.ECPoint{
-		XRaw: make([]byte, 32),
-		YRaw: make([]byte, 32),
-	}
-	if _, err := io.ReadFull(r, unique.XRaw); err != nil {
+	xBytes := make([]byte, 32)
+	yBytes := make([]byte, 32)
+	if _, err := io.ReadFull(r, xBytes); err != nil {
 		panic(err)
 	}
-	if _, err := io.ReadFull(r, unique.YRaw); err != nil {
+	if _, err := io.ReadFull(r, yBytes); err != nil {
 		panic(err)
 	}
 
-	return tpm2.Public{
-		Type:    tpm2.AlgECC,
-		NameAlg: tpm2.AlgSHA256,
-		Attributes: tpm2.FlagRestricted | tpm2.FlagDecrypt |
-			tpm2.FlagFixedTPM | tpm2.FlagFixedParent |
-			tpm2.FlagSensitiveDataOrigin | tpm2.FlagUserWithAuth,
-		ECCParameters: &tpm2.ECCParams{
-			Symmetric: &tpm2.SymScheme{
-				Alg:     tpm2.AlgAES,
-				KeyBits: 128,
-				Mode:    tpm2.AlgCFB,
-			},
-			CurveID: tpm2.CurveNISTP256,
-			Point:   unique,
+	return tpm2.TPMTPublic{
+		Type:    tpm2.TPMAlgECC,
+		NameAlg: tpm2.TPMAlgSHA256,
+		ObjectAttributes: tpm2.TPMAObject{
+			Restricted:          true,
+			Decrypt:             true,
+			FixedTPM:            true,
+			FixedParent:         true,
+			SensitiveDataOrigin: true,
+			UserWithAuth:        true,
 		},
+		Parameters: tpm2.NewTPMUPublicParms(
+			tpm2.TPMAlgECC,
+			&tpm2.TPMSECCParms{
+				Symmetric: tpm2.TPMTSymDefObject{
+					Algorithm: tpm2.TPMAlgAES,
+					KeyBits:   tpm2.NewTPMUSymKeyBits(tpm2.TPMAlgAES, tpm2.TPMKeyBits(128)),
+					Mode:      tpm2.NewTPMUSymMode(tpm2.TPMAlgAES, tpm2.TPMAlgCFB),
+				},
+				CurveID: tpm2.TPMECCNistP256,
+			},
+		),
+		Unique: tpm2.NewTPMUPublicID(
+			tpm2.TPMAlgECC,
+			&tpm2.TPMSECCPoint{
+				X: tpm2.TPM2BECCParameter{Buffer: xBytes},
+				Y: tpm2.TPM2BECCParameter{Buffer: yBytes},
+			},
+		),
 	}
 }
 
@@ -85,50 +99,72 @@ func (t *TPM) Counter() uint32 {
 	return uint32(unix - baseTime.Unix())
 }
 
-// Register a new key with the TPM for the given applicationParam.
-// RegisterKey returns the KeyHandle or an error.
+// RegisterKey generates a new key pair protected by the TPM.
+// Returns the key handle bytes, and the public key X/Y coordinates.
 func (t *TPM) RegisterKey(applicationParam []byte) ([]byte, *big.Int, *big.Int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	tpm, err := t.open()
+	tpmConn, err := t.open()
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("open tpm err: %w", err)
 	}
-	defer tpm.Close()
+	defer tpmConn.Close()
 
 	randSeed := mustRand(seedSizeBytes)
 
 	primaryTmpl := primaryKeyTmpl(randSeed, applicationParam)
 
-	childTmpl := tpm2.Public{
-		Type:    tpm2.AlgECC,
-		NameAlg: tpm2.AlgSHA256,
-		Attributes: tpm2.FlagFixedTPM | tpm2.FlagFixedParent |
-			tpm2.FlagSensitiveDataOrigin | tpm2.FlagUserWithAuth |
-			tpm2.FlagSign,
-		ECCParameters: &tpm2.ECCParams{
-
-			Sign: &tpm2.SigScheme{
-				Alg:  tpm2.AlgECDSA,
-				Hash: tpm2.AlgSHA256,
-			},
-			CurveID: tpm2.CurveNISTP256,
-			Point: tpm2.ECPoint{
-				XRaw: make([]byte, 32),
-				YRaw: make([]byte, 32),
-			},
+	childTmpl := tpm2.TPMTPublic{
+		Type:    tpm2.TPMAlgECC,
+		NameAlg: tpm2.TPMAlgSHA256,
+		ObjectAttributes: tpm2.TPMAObject{
+			FixedTPM:            true,
+			FixedParent:         true,
+			SensitiveDataOrigin: true,
+			UserWithAuth:        true,
+			SignEncrypt:         true,
 		},
+		Parameters: tpm2.NewTPMUPublicParms(
+			tpm2.TPMAlgECC,
+			&tpm2.TPMSECCParms{
+				Scheme: tpm2.TPMTECCScheme{
+					Scheme:  tpm2.TPMAlgECDSA,
+					Details: tpm2.NewTPMUAsymScheme(tpm2.TPMAlgECDSA, &tpm2.TPMSSigSchemeECDSA{HashAlg: tpm2.TPMAlgSHA256}),
+				},
+				CurveID: tpm2.TPMECCNistP256,
+			},
+		),
+		Unique: tpm2.NewTPMUPublicID(
+			tpm2.TPMAlgECC,
+			&tpm2.TPMSECCPoint{},
+		),
 	}
 
-	parentHandle, _, err := tpm2.CreatePrimary(tpm, tpm2.HandleOwner, tpm2.PCRSelection{}, "", "", primaryTmpl)
+	createPrimaryRsp, err := tpm2.CreatePrimary{
+		PrimaryHandle: tpm2.AuthHandle{
+			Handle: tpm2.TPMRHOwner,
+			Auth:   tpm2.PasswordAuth(nil),
+		},
+		InPublic: tpm2.New2B(primaryTmpl),
+	}.Execute(tpmConn)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("CreatePrimary key err: %w", err)
 	}
 
-	defer tpm2.FlushContext(tpm, parentHandle)
+	parentHandle := createPrimaryRsp.ObjectHandle
+	defer func() {
+		tpm2.FlushContext{FlushHandle: parentHandle}.Execute(tpmConn)
+	}()
 
-	private, public, _, _, _, err := tpm2.CreateKey(tpm, parentHandle, tpm2.PCRSelection{}, "", "", childTmpl)
+	createRsp, err := tpm2.Create{
+		ParentHandle: tpm2.AuthHandle{
+			Handle: parentHandle,
+			Name:   createPrimaryRsp.Name,
+			Auth:   tpm2.PasswordAuth(nil),
+		},
+		InPublic: tpm2.New2B(childTmpl),
+	}.Execute(tpmConn)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("CreateKey (child) err: %w", err)
 	}
@@ -136,24 +172,47 @@ func (t *TPM) RegisterKey(applicationParam []byte) ([]byte, *big.Int, *big.Int, 
 	var out bytes.Buffer
 	enc := lencode.NewEncoder(&out, lencode.SeparatorOpt(separator))
 
-	enc.Encode(private)
-	enc.Encode(public)
+	enc.Encode(createRsp.OutPrivate.Buffer)
+	enc.Encode(createRsp.OutPublic.Bytes())
 	enc.Encode(randSeed)
 
-	keyHandle, _, err := tpm2.Load(tpm, parentHandle, "", public, private)
+	loadRsp, err := tpm2.Load{
+		ParentHandle: tpm2.AuthHandle{
+			Handle: parentHandle,
+			Name:   createPrimaryRsp.Name,
+			Auth:   tpm2.PasswordAuth(nil),
+		},
+		InPrivate: createRsp.OutPrivate,
+		InPublic:  createRsp.OutPublic,
+	}.Execute(tpmConn)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("load child key err: %w", err)
 	}
 
-	defer tpm2.FlushContext(tpm, keyHandle)
+	keyHandle := loadRsp.ObjectHandle
+	defer func() {
+		tpm2.FlushContext{FlushHandle: keyHandle}.Execute(tpmConn)
+	}()
 
-	pub, _, _, err := tpm2.ReadPublic(tpm, keyHandle)
+	readPubRsp, err := tpm2.ReadPublic{
+		ObjectHandle: keyHandle,
+	}.Execute(tpmConn)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("read public key err: %w", err)
 	}
 
-	x := new(big.Int).SetBytes(pub.ECCParameters.Point.XRaw)
-	y := new(big.Int).SetBytes(pub.ECCParameters.Point.YRaw)
+	pubArea, err := readPubRsp.OutPublic.Contents()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("parse public area: %w", err)
+	}
+
+	eccPoint, err := pubArea.Unique.ECC()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("get ECC point: %w", err)
+	}
+
+	x := new(big.Int).SetBytes(eccPoint.X.Buffer)
+	y := new(big.Int).SetBytes(eccPoint.Y.Buffer)
 
 	return out.Bytes(), x, y, nil
 }
@@ -162,22 +221,22 @@ func (t *TPM) SignASN1(keyHandle, applicationParam, digest []byte) ([]byte, erro
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	tpm, err := t.open()
+	tpmConn, err := t.open()
 	if err != nil {
 		return nil, fmt.Errorf("open tpm err: %w", err)
 	}
-	defer tpm.Close()
+	defer tpmConn.Close()
 
 	dec := lencode.NewDecoder(bytes.NewReader(keyHandle), lencode.SeparatorOpt(separator))
 
 	invalidHandleErr := fmt.Errorf("invalid key handle")
 
-	private, err := dec.Decode()
+	privBytes, err := dec.Decode()
 	if err != nil {
 		return nil, invalidHandleErr
 	}
 
-	public, err := dec.Decode()
+	pubBytes, err := dec.Decode()
 	if err != nil {
 		return nil, invalidHandleErr
 	}
@@ -194,34 +253,72 @@ func (t *TPM) SignASN1(keyHandle, applicationParam, digest []byte) ([]byte, erro
 
 	srkTemplate := primaryKeyTmpl(seed, applicationParam)
 
-	parentHandle, _, err := tpm2.CreatePrimary(tpm, tpm2.HandleOwner, tpm2.PCRSelection{}, "", "", srkTemplate)
+	createPrimaryRsp, err := tpm2.CreatePrimary{
+		PrimaryHandle: tpm2.AuthHandle{
+			Handle: tpm2.TPMRHOwner,
+			Auth:   tpm2.PasswordAuth(nil),
+		},
+		InPublic: tpm2.New2B(srkTemplate),
+	}.Execute(tpmConn)
 	if err != nil {
 		return nil, fmt.Errorf("CreatePrimary key err: %w", err)
 	}
 
-	defer tpm2.FlushContext(tpm, parentHandle)
+	parentHandle := createPrimaryRsp.ObjectHandle
+	defer func() {
+		tpm2.FlushContext{FlushHandle: parentHandle}.Execute(tpmConn)
+	}()
 
-	key, _, err := tpm2.Load(tpm, parentHandle, "", public, private)
+	loadRsp, err := tpm2.Load{
+		ParentHandle: tpm2.AuthHandle{
+			Handle: parentHandle,
+			Name:   createPrimaryRsp.Name,
+			Auth:   tpm2.PasswordAuth(nil),
+		},
+		InPrivate: tpm2.TPM2BPrivate{Buffer: privBytes},
+		InPublic:  tpm2.BytesAs2B[tpm2.TPMTPublic, *tpm2.TPMTPublic](pubBytes),
+	}.Execute(tpmConn)
 	if err != nil {
 		return nil, fmt.Errorf("Load err: %w", err)
 	}
 
-	defer tpm2.FlushContext(tpm, key)
+	signingKey := loadRsp.ObjectHandle
+	defer func() {
+		tpm2.FlushContext{FlushHandle: signingKey}.Execute(tpmConn)
+	}()
 
-	scheme := &tpm2.SigScheme{
-		Alg:  tpm2.AlgECDSA,
-		Hash: tpm2.AlgSHA256,
-	}
-
-	sig, err := tpm2.Sign(tpm, key, "", digest[:], nil, scheme)
+	signRsp, err := tpm2.Sign{
+		KeyHandle: tpm2.AuthHandle{
+			Handle: signingKey,
+			Name:   loadRsp.Name,
+			Auth:   tpm2.PasswordAuth(nil),
+		},
+		Digest: tpm2.TPM2BDigest{Buffer: digest},
+		InScheme: tpm2.TPMTSigScheme{
+			Scheme:  tpm2.TPMAlgECDSA,
+			Details: tpm2.NewTPMUSigScheme(tpm2.TPMAlgECDSA, &tpm2.TPMSSchemeHash{HashAlg: tpm2.TPMAlgSHA256}),
+		},
+		Validation: tpm2.TPMTTKHashCheck{
+			Tag:       tpm2.TPMSTHashCheck,
+			Hierarchy: tpm2.TPMRHNull,
+		},
+	}.Execute(tpmConn)
 	if err != nil {
 		return nil, fmt.Errorf("sign err: %w", err)
 	}
 
+	ecdsaSig, err := signRsp.Signature.Signature.ECDSA()
+	if err != nil {
+		return nil, fmt.Errorf("get ECDSA signature: %w", err)
+	}
+
+	r := new(big.Int).SetBytes(ecdsaSig.SignatureR.Buffer)
+	s := new(big.Int).SetBytes(ecdsaSig.SignatureS.Buffer)
+
 	var b cryptobyte.Builder
 	b.AddASN1(asn1.SEQUENCE, func(b *cryptobyte.Builder) {
-		b.AddASN1BigInt(sig.ECC.R)
-		b.AddASN1BigInt(sig.ECC.S)
+		b.AddASN1BigInt(r)
+		b.AddASN1BigInt(s)
 	})
 
 	return b.Bytes()

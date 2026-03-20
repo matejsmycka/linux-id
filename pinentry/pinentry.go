@@ -1,6 +1,7 @@
 package pinentry
 
 import (
+	"crypto/rand"
 	"errors"
 	"log"
 	"os"
@@ -139,6 +140,16 @@ func (pe *Pinentry) prompt(req *request, prompt string) {
 			timer.Reset(d)
 		}
 	}
+}
+
+// ConfirmGeneric shows a confirmation dialog without challenge-based deduplication.
+// Use this for CTAP2 operations where browser retries don't occur.
+func (pe *Pinentry) ConfirmGeneric(prompt string) (chan Result, error) {
+	var nonce [32]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return nil, err
+	}
+	return pe.ConfirmPresence(prompt, nonce, nonce)
 }
 
 func FindPinentryGUIPath() string {
