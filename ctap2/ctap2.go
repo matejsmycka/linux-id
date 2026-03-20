@@ -16,7 +16,6 @@ const (
 	StatusOperationDenied     = byte(0x27)
 	StatusUserActionTimeout   = byte(0x2A)
 	StatusInvalidOption       = byte(0x2C) // uv=true but authenticator cannot verify identity
-	StatusUnsupportedOption   = byte(0x2D)
 	StatusNoCredentials       = byte(0x2E)
 	StatusNotAllowed          = byte(0x30)
 )
@@ -74,5 +73,4 @@ type MakeCredOptions struct {
 
 type GetAssertOptions struct {
 	UV bool `cbor:"uv,omitempty"`
-	UP bool `cbor:"up,omitempty"`
 }

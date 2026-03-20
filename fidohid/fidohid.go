@@ -3,7 +3,6 @@ package fidohid
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -41,8 +40,6 @@ type SoftToken struct {
 	device    *uhid.Device
 	evtChan   chan uhid.Event
 	authEvent chan AuthEvent
-
-	authFunc func()
 }
 
 type AuthEvent struct {
@@ -350,10 +347,6 @@ type packetReader struct {
 	err error
 }
 
-func (r *packetReader) Error() error {
-	return r.err
-}
-
 func (pr *packetReader) Read(order binary.ByteOrder, data interface{}) error {
 	if pr.err != nil {
 		return pr.err
@@ -377,15 +370,6 @@ func (pr *packetReader) ReadFull(b []byte) (int, error) {
 		return n, err
 	}
 	return n, nil
-}
-
-func mustRand(size int) []byte {
-	b := make([]byte, size)
-	if _, err := rand.Read(b); err != nil {
-		panic(err)
-	}
-
-	return b
 }
 
 type frameInit struct {

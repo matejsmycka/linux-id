@@ -716,11 +716,4 @@ func (s *server) handleGetAssertion(ctx context.Context, token *fidohid.SoftToke
 	token.WriteCtap2Response(ctx, evt, ctap2.StatusOK, encoded)
 }
 
-func mustRand(size int) []byte {
-	b := make([]byte, size)
-	if _, err := rand.Read(b); err != nil {
-		panic(err)
-	}
 
-	return b
-}

@@ -92,17 +92,3 @@ func (cs *CredStore) FindByRPID(rpIdHash []byte) ([]StoredCredential, error) {
 	return result, nil
 }
 
-// FindByCredID returns the credential with the given CredID, or nil if not found.
-func (cs *CredStore) FindByCredID(credId []byte) (*StoredCredential, error) {
-	creds, err := cs.load()
-	if err != nil {
-		return nil, err
-	}
-	for _, c := range creds {
-		if bytes.Equal(c.CredID, credId) {
-			cp := c
-			return &cp, nil
-		}
-	}
-	return nil, nil
-}
