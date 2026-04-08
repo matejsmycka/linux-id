@@ -228,42 +228,29 @@ func (s *server) handleAuthenticate(parentCtx context.Context, token *fidohid.So
 	var userPresent uint8
 
 	if req.Authenticate.Ctrl == fidoauth.CtrlEnforeUserPresenceAndSign {
-
-		pinResultCh, err := s.pe.ConfirmPresence("FIDO Confirm Auth", req.Authenticate.ChallengeParam, req.Authenticate.ApplicationParam)
-
+		resultCh, err := s.verifier.VerifyUser("FIDO Confirm Auth")
 		if err != nil {
-			log.Printf("pinentry err: %s", err)
+			log.Printf("verification trigger err: %s", err)
 			token.WriteResponse(parentCtx, evt, nil, statuscode.ConditionsNotSatisfied)
-
 			return
 		}
 
-		childCtx, cancel := context.WithTimeout(parentCtx, 750*time.Millisecond)
+		childCtx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
 		defer cancel()
 
 		select {
-		case result := <-pinResultCh:
+		case result := <-resultCh:
 			if result.OK {
 				userPresent = 0x01
 			} else {
 				if result.Error != nil {
-					log.Printf("Got pinentry result err: %s", result.Error)
+					log.Printf("Got verification result err: %s", result.Error)
 				}
-
-				// Got user cancelation, we want to propagate that so the browser gives up.
-				// This isn't normally supported by a key so there's no status code for this.
-				// WrongData seems like the least incorrect status code ¯\_(ツ)_/¯
-				err := token.WriteResponse(parentCtx, evt, nil, statuscode.WrongData)
-				if err != nil {
-					log.Printf("Write WrongData resp err: %s", err)
-				}
+				token.WriteResponse(parentCtx, evt, nil, statuscode.WrongData)
 				return
 			}
 		case <-childCtx.Done():
-			err := token.WriteResponse(parentCtx, evt, nil, statuscode.ConditionsNotSatisfied)
-			if err != nil {
-				log.Printf("Write swConditionsNotSatisfied resp err: %s", err)
-			}
+			token.WriteResponse(parentCtx, evt, nil, statuscode.ConditionsNotSatisfied)
 			return
 		}
 	}
@@ -645,26 +632,28 @@ func (s *server) handleGetAssertion(ctx context.Context, token *fidohid.SoftToke
 		keyHandle = storedCred.CredID
 	}
 
-	resultCh, err := s.verifier.VerifyUser("FIDO2 Authenticate: " + req.RPID)
-	if err != nil {
-		log.Printf("GetAssertion verifier err: %s", err)
-		token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
-		return
-	}
-	childCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
-	defer cancel()
-	select {
-	case result := <-resultCh:
-		if !result.OK {
-			if result.Error != nil {
-				log.Printf("GetAssertion verifier result err: %s", result.Error)
-			}
+	if req.Options.UV {
+		resultCh, err := s.verifier.VerifyUser("FIDO2 Authenticate: " + req.RPID)
+		if err != nil {
+			log.Printf("GetAssertion verifier err: %s", err)
 			token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
 			return
 		}
-	case <-childCtx.Done():
-		token.WriteCtap2Response(ctx, evt, ctap2.StatusUserActionTimeout, nil)
-		return
+		childCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
+		defer cancel()
+		select {
+		case result := <-resultCh:
+			if !result.OK {
+				if result.Error != nil {
+					log.Printf("GetAssertion verifier result err: %s", result.Error)
+				}
+				token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
+				return
+			}
+		case <-childCtx.Done():
+			token.WriteCtap2Response(ctx, evt, ctap2.StatusUserActionTimeout, nil)
+			return
+		}
 	}
 
 	// authenticatorData: rpIdHash(32) | flags(1) | signCount(4)
@@ -699,13 +688,18 @@ func (s *server) handleGetAssertion(ctx context.Context, token *fidohid.SoftToke
 		3: sig,
 	}
 	if storedCred != nil {
-		response[4] = map[string]interface{}{
-			"id":          storedCred.UserID,
-			"name":        storedCred.UserName,
-			"displayName": storedCred.DisplayName,
+		response[4] = map[int]interface{}{
+			1: storedCred.UserID,
+			2: storedCred.UserName,
+			3: storedCred.DisplayName,
 		}
 	}
-	encoded, err := cbor.Marshal(response)
+	// Create a CTAP2-compliant encoder options
+	opts := cbor.CanonicalEncOptions() // This ensures sorting 1, 2, 3...
+	em, _ := opts.EncMode()
+
+	// Use the encoder mode to marshal
+	encoded, err := em.Marshal(response)
 	if err != nil {
 		log.Printf("GetAssertion response marshal err: %s", err)
 		token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
@@ -715,5 +709,3 @@ func (s *server) handleGetAssertion(ctx context.Context, token *fidohid.SoftToke
 	log.Printf("GetAssertion ok: rp=%s", req.RPID)
 	token.WriteCtap2Response(ctx, evt, ctap2.StatusOK, encoded)
 }
-
-

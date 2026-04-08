@@ -61,38 +61,65 @@ func verifyFingerprint() error {
 	}
 
 	device := conn.Object("net.reactivated.Fprint", devices[0])
+
+	// This ensures we are "online" before the hardware triggers
+	if err := conn.AddMatchSignal(
+		dbus.WithMatchSender("net.reactivated.Fprint"),
+		dbus.WithMatchInterface("net.reactivated.Fprint.Device"),
+		dbus.WithMatchMember("VerifyStatus"),
+		dbus.WithMatchObjectPath(devices[0]), // Be specific to the device path
+	); err != nil {
+		return err
+	}
+
+	sigCh := make(chan *dbus.Signal, 10) // Buffer for multiple scan attempts
+	conn.Signal(sigCh)
+
 	if err := device.Call("net.reactivated.Fprint.Device.Claim", 0, "").Err; err != nil {
 		return err
 	}
 	defer device.Call("net.reactivated.Fprint.Device.Release", 0)
 
+	fmt.Println(">>> [Sensor Active] Please scan your finger...")
 	if err := device.Call("net.reactivated.Fprint.Device.VerifyStart", 0, "any").Err; err != nil {
 		return err
 	}
 	defer device.Call("net.reactivated.Fprint.Device.VerifyStop", 0)
 
-	if err := conn.AddMatchSignal(
-		dbus.WithMatchInterface("net.reactivated.Fprint.Device"),
-		dbus.WithMatchMember("VerifyStatus"),
-	); err != nil {
-		return err
-	}
-
-	sigCh := make(chan *dbus.Signal, 1)
-	conn.Signal(sigCh)
+	tryCount := 0
 
 	for {
 		select {
 		case sig := <-sigCh:
-			result := sig.Body[0].(string)
-			done := sig.Body[1].(bool)
-			if result == "verify-match" {
-				return nil
+			if len(sig.Body) < 2 {
+				continue
 			}
+
+			result, _ := sig.Body[0].(string)
+			done, _ := sig.Body[1].(bool)
+
 			if done {
-				return fmt.Errorf("fingerprint verification failed: %s", result)
+				if result == "verify-match" {
+					return nil
+				}
+
+				tryCount++
+				fmt.Printf(">>> [Scan Result] %s (Attempt %d/3)\n", result, tryCount)
+
+				if tryCount >= 3 {
+					return fmt.Errorf("fingerprint verification failed after %d attempts", tryCount)
+				}
+
+				// Reset the sensor
+				fmt.Println("Resetting sensor for next attempt...")
+				device.Call("net.reactivated.Fprint.Device.VerifyStop", 0)
+				time.Sleep(500 * time.Millisecond)
+
+				if err := device.Call("net.reactivated.Fprint.Device.VerifyStart", 0, "any").Err; err != nil {
+					return fmt.Errorf("failed to restart: %w", err)
+				}
 			}
-			// non-terminal status (e.g. "verify-retry-scan") — keep waiting
+
 		case <-time.After(30 * time.Second):
 			return fmt.Errorf("fingerprint verification timed out")
 		}
