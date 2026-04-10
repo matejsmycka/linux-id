@@ -1634,12 +1634,44 @@ func TestGetAssertion_NoResidentCredentials(t *testing.T) {
 	}
 }
 
-// NOTE: ctap2.StatusUserActionTimeout in this codebase is defined as 0x2A,
-// but the FIDO/CTAP2 spec value (per libfido2 fido/err.h) is 0x2F. 0x2A is
-// actually FIDO_ERR_NO_OPERATION_PENDING. This is a pre-existing constant
-// bug in ctap2/ctap2.go, not in scope for this tests-only PR. The test pins
-// whatever value the constant currently has so a fix won't silently regress
-// the rest of the suite.
+// TestStatusCodeValuesMatchSpec asserts every CTAP2 status code constant in
+// ctap2/ctap2.go has the value defined by the spec. Source of truth: libfido2
+// src/fido/err.h, which is generated from the FIDO Alliance CTAP 2.1 spec
+// section 8.2 "Status codes".
+//
+// If you change a constant value in ctap2.go and didn't intend to break spec
+// compliance, this test catches it.
+func TestStatusCodeValuesMatchSpec(t *testing.T) {
+	cases := []struct {
+		name string
+		got  byte
+		want byte
+	}{
+		{"StatusOK", ctap2.StatusOK, 0x00},
+		{"StatusInvalidCbor", ctap2.StatusInvalidCbor, 0x12},
+		{"StatusCredentialExcluded", ctap2.StatusCredentialExcluded, 0x19},
+		{"StatusUnsupportedAlg", ctap2.StatusUnsupportedAlg, 0x26},
+		{"StatusOperationDenied", ctap2.StatusOperationDenied, 0x27},
+		{"StatusInvalidOption", ctap2.StatusInvalidOption, 0x2C},
+		{"StatusNoCredentials", ctap2.StatusNoCredentials, 0x2E},
+		// 0x2F per CTAP 2.1 §8.2 / FIDO_ERR_USER_ACTION_TIMEOUT.
+		// 0x2A is FIDO_ERR_NO_OPERATION_PENDING — a different error.
+		{"StatusUserActionTimeout", ctap2.StatusUserActionTimeout, 0x2F},
+		{"StatusNotAllowed", ctap2.StatusNotAllowed, 0x30},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got != tc.want {
+				t.Errorf("ctap2.%s = 0x%02x, spec value is 0x%02x", tc.name, tc.got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGetAssertion_VerifierTimeout asserts the handler reports the spec-correct
+// timeout error code (CTAP2_ERR_USER_ACTION_TIMEOUT = 0x2F) when the verifier
+// doesn't complete in time. Pinning the constant rather than the literal so
+// the failure message reads cleanly.
 func TestGetAssertion_VerifierTimeout(t *testing.T) {
 	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
 	s := newTestServer(t, verifier, &fakePinentry{})
