@@ -184,6 +184,97 @@ func TestWaitForVerifyResult(t *testing.T) {
 	})
 }
 
+func TestVerifyPresence_CachesRecentSuccess(t *testing.T) {
+	fp := New()
+	calls := 0
+	orig := verifyFingerprintFunc
+	defer func() { verifyFingerprintFunc = orig }()
+	verifyFingerprintFunc = func() error {
+		calls++
+		return nil
+	}
+
+	ch1, err := fp.VerifyPresence()
+	if err != nil {
+		t.Fatalf("first VerifyPresence: %s", err)
+	}
+	r1 := <-ch1
+	if !r1.OK {
+		t.Fatalf("first result not OK: %+v", r1)
+	}
+	if calls != 1 {
+		t.Fatalf("after first call, calls = %d, want 1", calls)
+	}
+
+	ch2, err := fp.VerifyPresence()
+	if err != nil {
+		t.Fatalf("second VerifyPresence: %s", err)
+	}
+	r2 := <-ch2
+	if !r2.OK {
+		t.Fatalf("second result not OK: %+v", r2)
+	}
+	if calls != 1 {
+		t.Errorf("cached call still invoked verifyFingerprintFunc; calls = %d, want 1", calls)
+	}
+}
+
+func TestVerifyPresence_DoesNotCacheFailure(t *testing.T) {
+	fp := New()
+	calls := 0
+	orig := verifyFingerprintFunc
+	defer func() { verifyFingerprintFunc = orig }()
+	verifyFingerprintFunc = func() error {
+		calls++
+		return ErrNoMatch
+	}
+
+	ch1, _ := fp.VerifyPresence()
+	r1 := <-ch1
+	if r1.OK {
+		t.Fatalf("first result must not be OK; got %+v", r1)
+	}
+	if !errors.Is(r1.Error, ErrNoMatch) {
+		t.Errorf("first result error = %v, want ErrNoMatch", r1.Error)
+	}
+
+	ch2, _ := fp.VerifyPresence()
+	r2 := <-ch2
+	if r2.OK {
+		t.Errorf("second result must not be OK from cache after a failure; got %+v", r2)
+	}
+	if calls != 2 {
+		t.Errorf("failure must not be cached; verifyFingerprintFunc called %d times, want 2", calls)
+	}
+}
+
+func TestVerifyPresence_CacheExpires(t *testing.T) {
+	fp := New()
+	calls := 0
+	orig := verifyFingerprintFunc
+	defer func() { verifyFingerprintFunc = orig }()
+	verifyFingerprintFunc = func() error {
+		calls++
+		return nil
+	}
+
+	ch1, _ := fp.VerifyPresence()
+	<-ch1
+	if calls != 1 {
+		t.Fatalf("after first call, calls = %d, want 1", calls)
+	}
+
+	fp.mu.Lock()
+	fp.lastSuccessAt = time.Now().Add(-2 * uvCacheTTL)
+	fp.mu.Unlock()
+
+	ch2, _ := fp.VerifyPresence()
+	<-ch2
+	if calls != 2 {
+		t.Errorf("expired cache should not short-circuit; calls = %d, want 2", calls)
+	}
+}
+
 func TestProcessVerifyStatus_NoPanicOnAnyBody(t *testing.T) {
 	bodies := [][]interface{}{
 		nil,

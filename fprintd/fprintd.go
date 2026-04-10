@@ -17,7 +17,10 @@ const (
 	maxAttempts   = 3
 	attemptGap    = 500 * time.Millisecond
 	totalDeadline = 30 * time.Second
+	uvCacheTTL    = 5 * time.Second
 )
+
+var verifyFingerprintFunc = verifyFingerprint
 
 func drainSignals(ch <-chan *dbus.Signal) {
 	for {
@@ -35,14 +38,13 @@ type Result struct {
 }
 
 type Fprintd struct {
-	mu     sync.Mutex
-	active chan Result
+	mu            sync.Mutex
+	active        chan Result
+	lastSuccessAt time.Time
 }
 
 func New() *Fprintd { return &Fprintd{} }
 
-// VerifyPresence starts a fingerprint scan. If one is already in progress,
-// returns the same result channel (deduplication for browser retries).
 func (f *Fprintd) VerifyPresence() (chan Result, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -51,13 +53,22 @@ func (f *Fprintd) VerifyPresence() (chan Result, error) {
 		return f.active, nil
 	}
 
+	if !f.lastSuccessAt.IsZero() && time.Since(f.lastSuccessAt) < uvCacheTTL {
+		ch := make(chan Result, 1)
+		ch <- Result{OK: true}
+		return ch, nil
+	}
+
 	ch := make(chan Result, 1)
 	f.active = ch
 	go func() {
-		err := verifyFingerprint()
+		err := verifyFingerprintFunc()
 		result := Result{OK: err == nil, Error: err}
 		f.mu.Lock()
 		f.active = nil
+		if result.OK {
+			f.lastSuccessAt = time.Now()
+		}
 		f.mu.Unlock()
 		ch <- result
 	}()
