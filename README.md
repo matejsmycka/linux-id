@@ -4,13 +4,30 @@ Linux-id is FIDO token implementation for Linux that protects the token keys by 
 
 ## Setup
 
-```bash
-curl -L https://github.com/matejsmycka/linux-id/releases/latest/download/linux-id_Linux_x86_64.tar.gz | tar xz
-wget https://raw.githubusercontent.com/matejsmycka/linux-id/refs/heads/main/install.sh
 
+```bash
+curl -O https://raw.githubusercontent.com/matejsmycka/linux-id/refs/heads/main/install.sh
 chmod +x install.sh
+# Read what the script does before running it
 ./install.sh
 ```
+
+If you are living on the edge, you can also run:
+```bash
+curl https://raw.githubusercontent.com/matejsmycka/linux-id/refs/heads/main/install.sh | bash
+```
+
+### Non-official
+
+#### AUR
+
+If you're using an Arch-based system, you can install linux-id from the AUR.
+```bash
+yay -Syy linux-id
+```
+
+[https://aur.archlinux.org/packages/linux-id](https://aur.archlinux.org/packages/linux-id)
+
 
 ## Test
 
@@ -27,6 +44,7 @@ However, after a discussion with the author, I have decided to create a new repo
 - I have updated old methods according to the latest Go standards.
 - Old dependencies (e.g. pinetry) were replaced with updated ones.
 - UX improvements.
+- CTAP2 (biometric) support.
 
 ## CTAP2 / Passkeys
 
