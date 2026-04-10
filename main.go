@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"flag"
 	"log"
 	"math/big"
@@ -55,10 +56,24 @@ func main() {
 	s.run()
 }
 
-// VerifyResult is the outcome of a user verification attempt.
+type VerifyFailureReason int
+
+const (
+	ReasonUnspecified VerifyFailureReason = iota
+	ReasonNoMatch
+)
+
 type VerifyResult struct {
-	OK    bool
-	Error error
+	OK     bool
+	Reason VerifyFailureReason
+	Error  error
+}
+
+func statusForFailure(r VerifyResult) byte {
+	if r.Reason == ReasonNoMatch {
+		return ctap2.StatusUVInvalid
+	}
+	return ctap2.StatusOperationDenied
 }
 
 // UserVerifier abstracts over user confirmation methods for CTAP2.
@@ -93,7 +108,14 @@ func (v *fprintdVerifier) VerifyUser(prompt string) (<-chan VerifyResult, error)
 		return nil, err
 	}
 	out := make(chan VerifyResult, 1)
-	go func() { r := <-ch; out <- VerifyResult{OK: r.OK, Error: r.Error} }()
+	go func() {
+		r := <-ch
+		result := VerifyResult{OK: r.OK, Error: r.Error}
+		if !r.OK && errors.Is(r.Error, fprintd.ErrNoMatch) {
+			result.Reason = ReasonNoMatch
+		}
+		out <- result
+	}()
 	return out, nil
 }
 
@@ -514,7 +536,7 @@ func (s *server) handleMakeCredential(ctx context.Context, token tokenResponder,
 			if result.Error != nil {
 				log.Printf("MakeCredential verifier result err: %s", result.Error)
 			}
-			token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
+			token.WriteCtap2Response(ctx, evt, statusForFailure(result), nil)
 			return
 		}
 	case <-childCtx.Done():
@@ -684,7 +706,7 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 			if result.Error != nil {
 				log.Printf("GetAssertion verifier result err: %s", result.Error)
 			}
-			token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
+			token.WriteCtap2Response(ctx, evt, statusForFailure(result), nil)
 			return
 		}
 	case <-childCtx.Done():

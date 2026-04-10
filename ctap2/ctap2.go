@@ -18,6 +18,7 @@ const (
 	StatusNoCredentials       = byte(0x2E)
 	StatusUserActionTimeout   = byte(0x2F) // CTAP 2.1 §8.2 / FIDO_ERR_USER_ACTION_TIMEOUT
 	StatusNotAllowed          = byte(0x30)
+	StatusUVInvalid           = byte(0x3F)
 )
 
 // authenticatorData flags (WebAuthn §6.1).

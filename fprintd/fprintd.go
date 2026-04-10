@@ -1,12 +1,15 @@
 package fprintd
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/godbus/dbus/v5"
 )
+
+var ErrNoMatch = errors.New("fprintd: fingerprint did not match an enrolled finger")
 
 type Result struct {
 	OK    bool
@@ -128,6 +131,9 @@ func processVerifyStatus(body []interface{}) (matched, terminal bool, err error)
 	}
 	if result == "verify-match" {
 		return true, true, nil
+	}
+	if result == "verify-no-match" {
+		return false, true, ErrNoMatch
 	}
 	return false, true, fmt.Errorf("fingerprint verification failed: %s", result)
 }
