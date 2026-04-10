@@ -5,28 +5,12 @@ Linux-id is FIDO token implementation for Linux that protects the token keys by 
 ## Setup
 
 ```bash
-git clone git@github.com:matejsmycka/linux-id.git
-cd linux-id
+curl -L https://github.com/matejsmycka/linux-id/releases/latest/download/linux-id_Linux_x86_64.tar.gz | tar xz
+wget https://raw.githubusercontent.com/matejsmycka/linux-id/refs/heads/main/install.sh
+
 chmod +x install.sh
 ./install.sh
 ```
-
-`install.sh` builds the binary, installs it to `/usr/bin/linux-id`, ships a systemd **user** unit at `/usr/lib/systemd/user/linux-id.service` and udev rules at `/usr/lib/udev/rules.d/60-linux-id-fido-tpm.rules` (paths and contents byte-identical to the [AUR package](https://aur.archlinux.org/packages/linux-id)), then enables and starts the service.
-
-Log out and back in once so the `uaccess` udev tag grants your session access to `/dev/uhid` and `/dev/tpmrm0`.
-
-### Service control
-
-The unit is per-user, so commands take `--user` and **no sudo**:
-
-```bash
-systemctl --user status linux-id          # current state
-systemctl --user restart linux-id         # restart
-journalctl --user -u linux-id -f          # tail logs
-systemctl --user disable --now linux-id   # stop and don't autostart
-```
-
-Or install [the AUR package](https://aur.archlinux.org/packages/linux-id) directly: `paru -S linux-id`.
 
 ## Test
 
@@ -81,12 +65,6 @@ On an authentication request, linux-id will attempt to load the primary key by i
 linux-id requires `pinentry` to be available on the system. If you have gpg installed you most likely already have `pinentry`.
 
 For fingerprint authentication (`--auth fprintd`), `fprintd` must be installed and running.
-
-You will need one of the following (only for compiling):
-
-- `go` with version 1.22 or higher.
-- `podman` to compile in a container.
-- `docker` to compile in a container.
 
 ## Pinentry configuration
 
