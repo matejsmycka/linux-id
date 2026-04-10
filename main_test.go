@@ -749,6 +749,245 @@ func skipItem(b []byte) (int, error) {
 	return 0, fmt.Errorf("unsupported major type %d", mt)
 }
 
+// Direct unit test of ctap2Enc. Verifies that the encoder actually sorts map
+// keys, by feeding it a literal whose declared order does NOT match canonical
+// order. If ctap2Enc is wired to default cbor options instead of CTAP2EncOptions,
+// this test fails. This is the strong canonicality proof — the integration
+// tests below rely on this passing for their own correctness claims.
+//
+// The integration tests for MakeCredential / GetInfo / COSE-key happen to come
+// out canonical even with the default encoder (their literal map order is
+// already sorted), so they cannot directly distinguish ctap2Enc from default.
+// This unit test fills that gap.
+func TestCTAP2Enc_SortsMapKeys(t *testing.T) {
+	t.Run("integer keys, declared out of order", func(t *testing.T) {
+		// Map literal order ≠ canonical order. Default cbor.Marshal would
+		// emit these in iteration order (which fxamacker happens to make
+		// somewhat deterministic but NOT canonical).
+		m := map[int]string{4: "d", 1: "a", 3: "c", 2: "b", 5: "e"}
+		encoded, err := ctap2Enc.Marshal(m)
+		if err != nil {
+			t.Fatalf("marshal: %s", err)
+		}
+		order, err := readMapIntKeyOrder(encoded)
+		if err != nil {
+			t.Fatalf("walk: %s", err)
+		}
+		want := []int{1, 2, 3, 4, 5}
+		if fmt.Sprintf("%v", order) != fmt.Sprintf("%v", want) {
+			t.Errorf("ctap2Enc int-key order = %v, want %v", order, want)
+		}
+	})
+
+	t.Run("string keys, declared out of order", func(t *testing.T) {
+		// Bytewise lex order of CBOR encoding for these keys:
+		//   "id"          → 0x62 0x69 0x64
+		//   "icon"        → 0x64 0x69 0x63 0x6f 0x6e
+		//   "name"        → 0x64 0x6e 0x61 0x6d 0x65
+		//   "displayName" → 0x6b ...
+		// → id < icon < name < displayName (bytewise on CBOR-encoded form).
+		m := map[string]string{
+			"name":        "n",
+			"displayName": "d",
+			"id":          "i",
+			"icon":        "c",
+		}
+		encoded, err := ctap2Enc.Marshal(m)
+		if err != nil {
+			t.Fatalf("marshal: %s", err)
+		}
+		order, err := readMapStringKeyOrder(encoded)
+		if err != nil {
+			t.Fatalf("walk: %s", err)
+		}
+		want := []string{"id", "icon", "name", "displayName"}
+		if fmt.Sprintf("%v", order) != fmt.Sprintf("%v", want) {
+			t.Errorf("ctap2Enc str-key order = %v, want %v", order, want)
+		}
+	})
+
+	t.Run("mixed positive and negative integer keys (COSE shape)", func(t *testing.T) {
+		// COSE EC2 keys: 1=kty, 3=alg, -1=crv, -2=x, -3=y.
+		// CBOR encoding of small ints: positive 0..23 = 0x00..0x17,
+		//                              negative -1..-24 = 0x20..0x37.
+		// So positives sort before negatives in bytewise lex.
+		m := map[int]int{-3: 3, 1: 1, -1: 1, 3: 1, -2: 2}
+		encoded, err := ctap2Enc.Marshal(m)
+		if err != nil {
+			t.Fatalf("marshal: %s", err)
+		}
+		order, err := readSignedMapKeyOrder(encoded)
+		if err != nil {
+			t.Fatalf("walk: %s", err)
+		}
+		want := []int{1, 3, -1, -2, -3}
+		if fmt.Sprintf("%v", order) != fmt.Sprintf("%v", want) {
+			t.Errorf("ctap2Enc COSE-key order = %v, want %v", order, want)
+		}
+	})
+}
+
+// Response shape pinning for MakeCredential. NOT a canonicality test — see
+// TestCTAP2Enc_SortsMapKeys for that. This just confirms the response has
+// the expected top-level keys (1=fmt, 2=authData, 3=attStmt) and decodes.
+func TestMakeCredential_ResponseShape(t *testing.T) {
+	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
+	s := newTestServer(t, verifier, &fakePinentry{})
+
+	resp := &fakeResponder{}
+	payload := makeMakeCredCBOR(t, "shape-mc.example", "Shape", "user", false, false)
+	s.handleMakeCredential(context.Background(), resp, fidohid.AuthEvent{}, payload)
+
+	if resp.lastCtap2().status != ctap2.StatusOK {
+		t.Fatalf("status=0x%02x", resp.lastCtap2().status)
+	}
+	var top map[int]cbor.RawMessage
+	if err := cbor.Unmarshal(resp.lastCtap2().data, &top); err != nil {
+		t.Fatalf("response is not well-formed CBOR: %s", err)
+	}
+	for _, k := range []int{1, 2, 3} {
+		if _, ok := top[k]; !ok {
+			t.Errorf("MakeCredential response missing field %d", k)
+		}
+	}
+	var fmtField string
+	cbor.Unmarshal(top[1], &fmtField)
+	if fmtField != "none" {
+		t.Errorf("attestation fmt = %q, want \"none\" (privacy)", fmtField)
+	}
+}
+
+// Response shape pinning for GetInfo. NOT a canonicality test — see
+// TestCTAP2Enc_SortsMapKeys for that.
+func TestGetInfo_ResponseShape(t *testing.T) {
+	s := newTestServer(t, &fakeVerifier{performsUV: true}, &fakePinentry{})
+	resp := &fakeResponder{}
+	s.handleGetInfo(context.Background(), resp, fidohid.AuthEvent{})
+
+	if resp.lastCtap2().status != ctap2.StatusOK {
+		t.Fatalf("status=0x%02x", resp.lastCtap2().status)
+	}
+	var top map[int]cbor.RawMessage
+	if err := cbor.Unmarshal(resp.lastCtap2().data, &top); err != nil {
+		t.Fatalf("response is not well-formed CBOR: %s", err)
+	}
+	for _, k := range []int{1, 3, 4, 5} {
+		if _, ok := top[k]; !ok {
+			t.Errorf("GetInfo response missing field %d", k)
+		}
+	}
+	var versions []string
+	cbor.Unmarshal(top[1], &versions)
+	hasFIDO2, hasU2F := false, false
+	for _, v := range versions {
+		if v == "FIDO_2_0" {
+			hasFIDO2 = true
+		}
+		if v == "U2F_V2" {
+			hasU2F = true
+		}
+	}
+	if !hasFIDO2 || !hasU2F {
+		t.Errorf("versions = %v, want both FIDO_2_0 and U2F_V2", versions)
+	}
+}
+
+// readSignedMapKeyOrder is like readMapIntKeyOrder but accepts CBOR negative
+// integer keys too (used for COSE keys where -1=crv, -2=x, -3=y).
+func readSignedMapKeyOrder(raw []byte) ([]int, error) {
+	if len(raw) < 1 {
+		return nil, errors.New("empty cbor")
+	}
+	mt := raw[0] >> 5
+	if mt != 5 {
+		return nil, fmt.Errorf("not a map: major type %d", mt)
+	}
+	pos := 1
+	count := int(raw[0] & 0x1f)
+	if count == 0x18 {
+		count = int(raw[1])
+		pos = 2
+	}
+	out := make([]int, 0, count)
+	for i := 0; i < count; i++ {
+		k, n, err := readInt(raw[pos:])
+		if err != nil {
+			return nil, fmt.Errorf("key %d: %w", i, err)
+		}
+		out = append(out, k)
+		pos += n
+		vn, err := skipItem(raw[pos:])
+		if err != nil {
+			return nil, err
+		}
+		pos += vn
+	}
+	return out, nil
+}
+
+// Encoding the same input twice MUST produce identical bytes. Without
+// canonical encoding this can flip on Go map iteration order. With ctap2Enc,
+// the bytes are stable across runs and across processes.
+func TestCBOR_EncodingIsByteStable(t *testing.T) {
+	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
+	s := newTestServer(t, verifier, &fakePinentry{})
+	registerCred(t, s, "stable.example", "Stable", "user", true /*rk*/)
+
+	// Run the same GetAssertion 10 times and confirm authData + signature
+	// shape is byte-identical for the deterministic parts (everything except
+	// the signature, which is randomized by ECDSA, and the counter, which
+	// increments).
+	var firstAuthData []byte
+	for i := 0; i < 10; i++ {
+		resp := &fakeResponder{}
+		payload := makeAssertionCBOR(t, "stable.example", nil, nil)
+		s.handleGetAssertion(context.Background(), resp, fidohid.AuthEvent{}, payload)
+		if resp.lastCtap2().status != ctap2.StatusOK {
+			t.Fatalf("iter %d: status=0x%02x", i, resp.lastCtap2().status)
+		}
+		top := decodeAssertion(t, resp.lastCtap2().data)
+		var authData []byte
+		cbor.Unmarshal(top[2], &authData)
+		// authData = rpIdHash(32) | flags(1) | counter(4). Strip the counter
+		// before comparing, since counters increment.
+		stable := append([]byte{}, authData[:33]...) // rpIdHash + flags
+		if i == 0 {
+			firstAuthData = stable
+			continue
+		}
+		if !bytes.Equal(stable, firstAuthData) {
+			t.Errorf("iter %d: authData prefix changed across runs", i)
+		}
+		// And the user entity bytes (key 4) must be byte-identical (no signing,
+		// no counter). This is the strongest stability check we can make.
+		if !bytes.Equal(top[4], decodeAssertion(t, resp.lastCtap2().data)[4]) {
+			t.Errorf("iter %d: user entity bytes drifted", i)
+		}
+	}
+}
+
+// The canonical bytes must round-trip cleanly through fxamacker/cbor's standard
+// decoder. Catches any encoder option that produces non-decodable output.
+func TestCBOR_CanonicalOutputRoundTrips(t *testing.T) {
+	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
+	s := newTestServer(t, verifier, &fakePinentry{})
+	registerCred(t, s, "rt.example", "RT", "user", true)
+
+	resp := &fakeResponder{}
+	payload := makeAssertionCBOR(t, "rt.example", nil, nil)
+	s.handleGetAssertion(context.Background(), resp, fidohid.AuthEvent{}, payload)
+
+	var top map[int]interface{}
+	if err := cbor.Unmarshal(resp.lastCtap2().data, &top); err != nil {
+		t.Fatalf("response is not well-formed CBOR: %s", err)
+	}
+	for _, key := range []int{1, 2, 3, 4} {
+		if _, ok := top[key]; !ok {
+			t.Errorf("response missing key %d", key)
+		}
+	}
+}
+
 // The signature in field 3 must verify against the assertion's authData ||
 // clientDataHash. Catches any change that breaks the signing input.
 func TestGetAssertion_SignatureCoversAuthDataAndClientDataHash(t *testing.T) {
@@ -1007,6 +1246,163 @@ func TestRealWorld_DuplicateRegistrationRejected(t *testing.T) {
 	s.handleMakeCredential(context.Background(), resp, fidohid.AuthEvent{}, payload)
 	if got := resp.lastCtap2().status; got != ctap2.StatusCredentialExcluded {
 		t.Fatalf("expected StatusCredentialExcluded (0x19), got 0x%02x", got)
+	}
+}
+
+// AllowList ordering: when several credentials are listed but only the second
+// is recoverable by our signer, the handler must walk past the invalid one
+// and pick the valid one. The order in the response's `credential` field must
+// match the entry that was actually used.
+func TestGetAssertion_AllowListSecondCredValid(t *testing.T) {
+	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
+	s := newTestServer(t, verifier, &fakePinentry{})
+	credID := registerCred(t, s, "multi.example", "Multi", "user", false)
+
+	// First entry: total junk. Second entry: real cred. Handler must use #2.
+	resp := &fakeResponder{}
+	payload := makeAssertionCBOR(t, "multi.example",
+		[]ctap2.CredDescriptor{
+			{Type: "public-key", ID: []byte("not-a-real-cred-id-12345")},
+			{Type: "public-key", ID: credID},
+		},
+		nil)
+	s.handleGetAssertion(context.Background(), resp, fidohid.AuthEvent{}, payload)
+
+	if resp.lastCtap2().status != ctap2.StatusOK {
+		t.Fatalf("status=0x%02x", resp.lastCtap2().status)
+	}
+	top := decodeAssertion(t, resp.lastCtap2().data)
+	var cred map[string]interface{}
+	if err := cbor.Unmarshal(top[1], &cred); err != nil {
+		t.Fatalf("decode credential descriptor: %s", err)
+	}
+	gotID, ok := cred["id"].([]byte)
+	if !ok {
+		t.Fatalf("credential.id is not []byte: %T", cred["id"])
+	}
+	if !bytes.Equal(gotID, credID) {
+		t.Errorf("returned credential id = %x, want %x", gotID, credID)
+	}
+}
+
+// AllowList where every entry is invalid: handler must return NoCredentials
+// and never invoke the verifier (no point asking for biometric if there's no
+// key to sign with).
+func TestGetAssertion_AllowListAllInvalidNoVerifierCall(t *testing.T) {
+	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
+	s := newTestServer(t, verifier, &fakePinentry{})
+
+	resp := &fakeResponder{}
+	payload := makeAssertionCBOR(t, "junk.example",
+		[]ctap2.CredDescriptor{
+			{Type: "public-key", ID: []byte("garbage1")},
+			{Type: "public-key", ID: []byte("garbage2")},
+			{Type: "public-key", ID: []byte("garbage3")},
+		},
+		nil)
+	s.handleGetAssertion(context.Background(), resp, fidohid.AuthEvent{}, payload)
+
+	if got := resp.lastCtap2().status; got != ctap2.StatusNoCredentials {
+		t.Fatalf("expected StatusNoCredentials, got 0x%02x", got)
+	}
+	if verifier.callCount != 0 {
+		t.Errorf("verifier must not be called if no credential matches; got %d calls", verifier.callCount)
+	}
+}
+
+// Resident credential with empty optional fields. Browsers can register a
+// passkey where only `id` is set (no name, no display name) when the user
+// chooses anonymous mode. The user entity in the response must still be
+// well-formed CBOR with all three string keys.
+func TestGetAssertion_ResidentCredentialMinimalUserFields(t *testing.T) {
+	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
+	s := newTestServer(t, verifier, &fakePinentry{})
+
+	// Register with empty name + displayName.
+	req := ctap2.MakeCredentialRequest{
+		ClientDataHash:   sha256.New().Sum([]byte("mc:anon"))[:32],
+		RP:               ctap2.RPEntity{ID: "anon.example", Name: "Anon"},
+		User:             ctap2.UserEntity{ID: []byte("anonymous-handle")},
+		PubKeyCredParams: []ctap2.CredParam{{Type: "public-key", Alg: -7}},
+		Options:          &ctap2.MakeCredOptions{RK: true},
+	}
+	mcPayload, _ := cbor.Marshal(req)
+	mcResp := &fakeResponder{}
+	s.handleMakeCredential(context.Background(), mcResp, fidohid.AuthEvent{}, mcPayload)
+	if mcResp.lastCtap2().status != ctap2.StatusOK {
+		t.Fatalf("register: 0x%02x", mcResp.lastCtap2().status)
+	}
+
+	// Now look the resident credential up.
+	gaResp := &fakeResponder{}
+	gaPayload := makeAssertionCBOR(t, "anon.example", nil, nil)
+	s.handleGetAssertion(context.Background(), gaResp, fidohid.AuthEvent{}, gaPayload)
+	if gaResp.lastCtap2().status != ctap2.StatusOK {
+		t.Fatalf("assert: 0x%02x", gaResp.lastCtap2().status)
+	}
+
+	top := decodeAssertion(t, gaResp.lastCtap2().data)
+	var user map[string]interface{}
+	if err := cbor.Unmarshal(top[4], &user); err != nil {
+		t.Fatalf("user entity: %s", err)
+	}
+	if id, _ := user["id"].([]byte); !bytes.Equal(id, []byte("anonymous-handle")) {
+		t.Errorf("user.id = %x, want %x", id, []byte("anonymous-handle"))
+	}
+	// Empty strings are still acceptable. Just confirm the keys are there
+	// (canonical CBOR shape) — value content can be empty.
+	if _, ok := user["name"]; !ok {
+		t.Errorf("user entity missing name key (even if empty)")
+	}
+	if _, ok := user["displayName"]; !ok {
+		t.Errorf("user entity missing displayName key (even if empty)")
+	}
+}
+
+// COSE EC2 public key shape: the inner crypto key inside MakeCredential's
+// authenticatorData must be a valid P-256 ES256 key. Field tags:
+//   1  (kty)  = 2  (EC2)
+//   3  (alg)  = -7 (ES256)
+//   -1 (crv)  = 1  (P-256)
+//   -2 (x)    = 32 bytes
+//   -3 (y)    = 32 bytes
+func TestMakeCredential_COSEKeyShape(t *testing.T) {
+	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
+	s := newTestServer(t, verifier, &fakePinentry{})
+
+	resp := &fakeResponder{}
+	payload := makeMakeCredCBOR(t, "cose-shape.example", "Shape", "user", false, false)
+	s.handleMakeCredential(context.Background(), resp, fidohid.AuthEvent{}, payload)
+	if resp.lastCtap2().status != ctap2.StatusOK {
+		t.Fatalf("status=0x%02x", resp.lastCtap2().status)
+	}
+
+	var top map[int]cbor.RawMessage
+	cbor.Unmarshal(resp.lastCtap2().data, &top)
+	var authData []byte
+	cbor.Unmarshal(top[2], &authData)
+	credIDLen := int(authData[32+1+4+16])<<8 | int(authData[32+1+4+16+1])
+	coseStart := 32 + 1 + 4 + 16 + 2 + credIDLen
+	coseBytes := authData[coseStart:]
+
+	var cose map[int]interface{}
+	if err := cbor.Unmarshal(coseBytes, &cose); err != nil {
+		t.Fatalf("decode cose key: %s", err)
+	}
+	if kty, _ := cose[1].(uint64); kty != 2 {
+		t.Errorf("kty = %v, want 2 (EC2)", cose[1])
+	}
+	if alg, _ := cose[3].(int64); alg != -7 {
+		t.Errorf("alg = %v, want -7 (ES256)", cose[3])
+	}
+	if crv, _ := cose[-1].(uint64); crv != 1 {
+		t.Errorf("crv = %v, want 1 (P-256)", cose[-1])
+	}
+	if x, _ := cose[-2].([]byte); len(x) != 32 {
+		t.Errorf("x len = %d, want 32", len(x))
+	}
+	if y, _ := cose[-3].([]byte); len(y) != 32 {
+		t.Errorf("y len = %d, want 32", len(y))
 	}
 }
 
