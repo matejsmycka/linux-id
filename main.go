@@ -30,6 +30,13 @@ var backend = flag.String("backend", "tpm", "tpm|memory")
 var device = flag.String("device", "/dev/tpmrm0", "TPM device path")
 var auth = flag.String("auth", "pinentry", "pinentry|fprintd — pinentry confirms presence (UP only); fprintd verifies identity via fingerprint (UP+UV)")
 
+// tokenResponder is the subset of *fidohid.SoftToken that the request handlers
+// need to write replies. It exists so handlers can be unit-tested with a fake.
+type tokenResponder interface {
+	WriteResponse(ctx context.Context, evt fidohid.AuthEvent, data []byte, status uint16) error
+	WriteCtap2Response(ctx context.Context, evt fidohid.AuthEvent, status byte, data []byte) error
+}
+
 func main() {
 	flag.Parse()
 	s := newServer()
@@ -80,9 +87,15 @@ func (v *fprintdVerifier) VerifyUser(prompt string) (<-chan VerifyResult, error)
 
 func (v *fprintdVerifier) PerformsUV() bool { return true }
 
+// pinentryClient is the subset of *pinentry.Pinentry that the U2F handlers
+// use. Exists so handleRegister/handleAuthenticate can be unit-tested with a fake.
+type pinentryClient interface {
+	ConfirmPresence(prompt string, challengeParam, applicationParam [32]byte) (chan pinentry.Result, error)
+}
+
 type server struct {
-	pe       *pinentry.Pinentry // CTAP1/U2F — browser-retry dedup via challenge params
-	verifier UserVerifier       // CTAP2 — configured via --auth flag
+	pe       pinentryClient // CTAP1/U2F — browser-retry dedup via challenge params
+	verifier UserVerifier   // CTAP2 — configured via --auth flag
 	signer   Signer
 	cs       *ctap2.CredStore
 }
@@ -172,7 +185,7 @@ func (s *server) run() {
 	}
 }
 
-func (s *server) handleVersion(parentCtx context.Context, token *fidohid.SoftToken, evt fidohid.AuthEvent) {
+func (s *server) handleVersion(parentCtx context.Context, token tokenResponder, evt fidohid.AuthEvent) {
 	log.Printf("Sending version 'U2F_V2' for CTAP1/U2F compatibility")
 	if err := token.WriteResponse(parentCtx, evt, []byte("U2F_V2"), statuscode.NoError); err != nil {
 		log.Printf("write version response err: %s", err)
@@ -180,7 +193,7 @@ func (s *server) handleVersion(parentCtx context.Context, token *fidohid.SoftTok
 	}
 }
 
-func (s *server) handleAuthenticate(parentCtx context.Context, token *fidohid.SoftToken, evt fidohid.AuthEvent) {
+func (s *server) handleAuthenticate(parentCtx context.Context, token tokenResponder, evt fidohid.AuthEvent) {
 	req := evt.Req
 
 	keyHandle := req.Authenticate.KeyHandle
@@ -296,7 +309,7 @@ func (s *server) handleAuthenticate(parentCtx context.Context, token *fidohid.So
 	}
 }
 
-func (s *server) handleRegister(parentCtx context.Context, token *fidohid.SoftToken, evt fidohid.AuthEvent) {
+func (s *server) handleRegister(parentCtx context.Context, token tokenResponder, evt fidohid.AuthEvent) {
 	ctx, cancel := context.WithTimeout(parentCtx, 750*time.Millisecond)
 	defer cancel()
 	req := evt.Req
@@ -338,7 +351,7 @@ func (s *server) handleRegister(parentCtx context.Context, token *fidohid.SoftTo
 	}
 }
 
-func (s *server) registerSite(ctx context.Context, token *fidohid.SoftToken, evt fidohid.AuthEvent) {
+func (s *server) registerSite(ctx context.Context, token tokenResponder, evt fidohid.AuthEvent) {
 	req := evt.Req
 
 	keyHandle, x, y, err := s.signer.RegisterKey(req.Register.ApplicationParam[:])
@@ -387,7 +400,7 @@ func (s *server) registerSite(ctx context.Context, token *fidohid.SoftToken, evt
 }
 
 // handleCtap2 dispatches incoming CTAP2 (CmdCbor) events.
-func (s *server) handleCtap2(ctx context.Context, token *fidohid.SoftToken, evt fidohid.AuthEvent) {
+func (s *server) handleCtap2(ctx context.Context, token tokenResponder, evt fidohid.AuthEvent) {
 	if len(evt.RawCbor) == 0 {
 		token.WriteCtap2Response(ctx, evt, ctap2.StatusInvalidCbor, nil)
 		return
@@ -408,7 +421,7 @@ func (s *server) handleCtap2(ctx context.Context, token *fidohid.SoftToken, evt 
 
 // handleGetInfo returns CTAP2 authenticator capabilities.
 // The UV option is honest: true only when using fprintd (actual identity verification).
-func (s *server) handleGetInfo(ctx context.Context, token *fidohid.SoftToken, evt fidohid.AuthEvent) {
+func (s *server) handleGetInfo(ctx context.Context, token tokenResponder, evt fidohid.AuthEvent) {
 	log.Print("got Ctap2Cmd GetInfo")
 
 	options := map[string]bool{
@@ -433,7 +446,7 @@ func (s *server) handleGetInfo(ctx context.Context, token *fidohid.SoftToken, ev
 }
 
 // handleMakeCredential implements CTAP2 authenticatorMakeCredential (passkey registration).
-func (s *server) handleMakeCredential(ctx context.Context, token *fidohid.SoftToken, evt fidohid.AuthEvent, payload []byte) {
+func (s *server) handleMakeCredential(ctx context.Context, token tokenResponder, evt fidohid.AuthEvent, payload []byte) {
 	log.Print("got Ctap2Cmd MakeCredential")
 
 	var req ctap2.MakeCredentialRequest
@@ -587,7 +600,7 @@ func (s *server) handleMakeCredential(ctx context.Context, token *fidohid.SoftTo
 }
 
 // handleGetAssertion implements CTAP2 authenticatorGetAssertion (passkey authentication).
-func (s *server) handleGetAssertion(ctx context.Context, token *fidohid.SoftToken, evt fidohid.AuthEvent, payload []byte) {
+func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, evt fidohid.AuthEvent, payload []byte) {
 	log.Print("got Ctap2Cmd GetAssertion")
 
 	var req ctap2.GetAssertionRequest
