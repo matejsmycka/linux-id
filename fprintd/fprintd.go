@@ -89,20 +89,45 @@ func verifyFingerprint() error {
 	for {
 		select {
 		case sig := <-sigCh:
-			if len(sig.Body) < 2 {
-				continue // malformed signal — keep waiting
-			}
-			result, _ := sig.Body[0].(string)
-			done, _ := sig.Body[1].(bool)
-			if result == "verify-match" {
+			matched, terminal, err := processVerifyStatus(sig.Body)
+			if matched {
 				return nil
 			}
-			if done {
-				return fmt.Errorf("fingerprint verification failed: %s", result)
+			if terminal {
+				return err
 			}
 			// non-terminal status (e.g. "verify-retry-scan") — keep waiting
 		case <-time.After(30 * time.Second):
 			return fmt.Errorf("fingerprint verification timed out")
 		}
 	}
+}
+
+// processVerifyStatus interprets a single fprintd VerifyStatus signal body.
+//
+// Returns:
+//   - matched=true  → verification succeeded; caller should return nil
+//   - terminal=true → verification ended (success or failure); caller should
+//     return err (nil on success, non-nil on failure)
+//   - matched=false, terminal=false → non-terminal status (e.g. verify-retry-scan,
+//     malformed signal). Caller should keep waiting.
+//
+// Defensive against malformed signals: a body shorter than 2 elements or with
+// the wrong types is treated as non-terminal so a single garbage signal cannot
+// crash the daemon.
+func processVerifyStatus(body []interface{}) (matched, terminal bool, err error) {
+	if len(body) < 2 {
+		return false, false, nil
+	}
+	result, _ := body[0].(string)
+	done, _ := body[1].(bool)
+	if !done {
+		// Either non-terminal status or wrong types on the booleans.
+		// Either way: keep waiting for the next signal.
+		return false, false, nil
+	}
+	if result == "verify-match" {
+		return true, true, nil
+	}
+	return false, true, fmt.Errorf("fingerprint verification failed: %s", result)
 }
