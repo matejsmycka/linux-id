@@ -152,7 +152,11 @@ func (f *fakeSigner) Counter() uint32 {
 // fakePinentry mimics *pinentry.Pinentry for the U2F path. It replays the
 // browser-retry dedup behaviour: a second ConfirmPresence call with the same
 // challenge/app params returns the same channel without prompting twice.
+//
+// All state is guarded by mu so the test suite is race-clean (the dedup test
+// drives ConfirmPresence from two goroutines concurrently).
 type fakePinentry struct {
+	mu          sync.Mutex
 	promptCount int
 	calls       []fakePinCall
 
@@ -174,6 +178,8 @@ type fakePinCall struct {
 }
 
 func (p *fakePinentry) ConfirmPresence(prompt string, challenge, app [32]byte) (chan pinentry.Result, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.calls = append(p.calls, fakePinCall{prompt: prompt, challenge: challenge, app: app})
 	if p.startErr != nil {
 		return nil, p.startErr
@@ -203,10 +209,30 @@ func (p *fakePinentry) ConfirmPresence(prompt string, challenge, app [32]byte) (
 	return ch, nil
 }
 
+// snapshotPromptCount returns the prompt counter under lock so tests can
+// inspect it without racing the handler goroutines.
+func (p *fakePinentry) snapshotPromptCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.promptCount
+}
+
+// snapshotCalls returns a copy of the recorded calls under lock.
+func (p *fakePinentry) snapshotCalls() []fakePinCall {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]fakePinCall, len(p.calls))
+	copy(out, p.calls)
+	return out
+}
+
 func (p *fakePinentry) release() {
-	if p.releaseChan != nil {
-		close(p.releaseChan)
-		p.releaseChan = nil
+	p.mu.Lock()
+	rc := p.releaseChan
+	p.releaseChan = nil
+	p.mu.Unlock()
+	if rc != nil {
+		close(rc)
 	}
 }
 
@@ -796,13 +822,14 @@ func TestRealWorld_AWSLegacyU2FAuth(t *testing.T) {
 	if resp.lastU2F().status != statuscode.NoError {
 		t.Fatalf("expected NoError, got 0x%04x", resp.lastU2F().status)
 	}
-	if pe.promptCount != 1 {
-		t.Errorf("expected exactly 1 pinentry prompt, got %d", pe.promptCount)
+	if got := pe.snapshotPromptCount(); got != 1 {
+		t.Errorf("expected exactly 1 pinentry prompt, got %d", got)
 	}
-	if len(pe.calls) == 0 || pe.calls[0].challenge != authReq.Authenticate.ChallengeParam {
+	calls := pe.snapshotCalls()
+	if len(calls) == 0 || calls[0].challenge != authReq.Authenticate.ChallengeParam {
 		t.Errorf("pinentry was not invoked with the request's challenge param")
 	}
-	if pe.calls[0].app != appParam {
+	if calls[0].app != appParam {
 		t.Errorf("pinentry was not invoked with the request's application param")
 	}
 
@@ -862,8 +889,8 @@ func TestRealWorld_U2FBrowserPollingDedup(t *testing.T) {
 	}()
 	time.Sleep(20 * time.Millisecond)
 
-	if pe.promptCount != 1 {
-		t.Errorf("expected 1 pinentry prompt for browser polling, got %d", pe.promptCount)
+	if got := pe.snapshotPromptCount(); got != 1 {
+		t.Errorf("expected 1 pinentry prompt for browser polling, got %d", got)
 	}
 
 	pe.release()
@@ -927,8 +954,8 @@ func TestRealWorld_U2FCheckOnly(t *testing.T) {
 	resp := &fakeResponder{}
 	s.handleAuthenticate(context.Background(), resp, fidohid.AuthEvent{Req: authReq})
 
-	if pe.promptCount != 0 {
-		t.Errorf("check-only must not prompt the user, got %d prompts", pe.promptCount)
+	if got := pe.snapshotPromptCount(); got != 0 {
+		t.Errorf("check-only must not prompt the user, got %d prompts", got)
 	}
 	if got := resp.lastU2F().status; got != statuscode.ConditionsNotSatisfied {
 		t.Fatalf("expected ConditionsNotSatisfied, got 0x%04x", got)
@@ -954,8 +981,8 @@ func TestRealWorld_U2FUnknownKeyHandle(t *testing.T) {
 	resp := &fakeResponder{}
 	s.handleAuthenticate(context.Background(), resp, fidohid.AuthEvent{Req: authReq})
 
-	if pe.promptCount != 0 {
-		t.Errorf("invalid key handle must short-circuit before pinentry, got %d prompts", pe.promptCount)
+	if got := pe.snapshotPromptCount(); got != 0 {
+		t.Errorf("invalid key handle must short-circuit before pinentry, got %d prompts", got)
 	}
 	if got := resp.lastU2F().status; got != statuscode.WrongData {
 		t.Fatalf("expected WrongData, got 0x%04x", got)
@@ -992,6 +1019,12 @@ func TestGetAssertion_NoResidentCredentials(t *testing.T) {
 	}
 }
 
+// NOTE: ctap2.StatusUserActionTimeout in this codebase is defined as 0x2A,
+// but the FIDO/CTAP2 spec value (per libfido2 fido/err.h) is 0x2F. 0x2A is
+// actually FIDO_ERR_NO_OPERATION_PENDING. This is a pre-existing constant
+// bug in ctap2/ctap2.go, not in scope for this tests-only PR. The test pins
+// whatever value the constant currently has so a fix won't silently regress
+// the rest of the suite.
 func TestGetAssertion_VerifierTimeout(t *testing.T) {
 	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
 	s := newTestServer(t, verifier, &fakePinentry{})
@@ -1016,7 +1049,8 @@ func TestGetAssertion_VerifierTimeout(t *testing.T) {
 
 	close(gate) // unblock the goroutine so it doesn't leak
 	if got := resp.lastCtap2().status; got != ctap2.StatusUserActionTimeout {
-		t.Fatalf("expected StatusUserActionTimeout (0x2A), got 0x%02x", got)
+		t.Fatalf("expected StatusUserActionTimeout (0x%02x), got 0x%02x",
+			ctap2.StatusUserActionTimeout, got)
 	}
 }
 
