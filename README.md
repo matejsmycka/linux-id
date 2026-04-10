@@ -12,9 +12,10 @@ chmod +x install.sh
 ./install.sh
 ```
 
-If you are living on the edge, you can also run:
+To use fingerprint authentication, install with `--auth fprintd`.
+
 ```bash
-curl https://raw.githubusercontent.com/matejsmycka/linux-id/refs/heads/main/install.sh | bash
+./install.sh --auth fprintd
 ```
 
 ### Non-official
