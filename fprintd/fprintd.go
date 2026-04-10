@@ -16,15 +16,18 @@ var ErrNoMatch = errors.New("fprintd: fingerprint did not match an enrolled fing
 const (
 	maxAttempts   = 3
 	attemptGap    = 500 * time.Millisecond
+	settleDelay   = 100 * time.Millisecond
 	totalDeadline = 30 * time.Second
 )
 
-func drainSignals(ch <-chan *dbus.Signal) {
+func drainSignals(ch <-chan *dbus.Signal) int {
+	n := 0
 	for {
 		select {
 		case <-ch:
+			n++
 		default:
-			return
+			return n
 		}
 	}
 }
@@ -118,12 +121,20 @@ func verifyFingerprint() error {
 			case <-ctx.Done():
 				return fmt.Errorf("fingerprint verification timed out")
 			}
-			drainSignals(sigCh)
 			if err := device.Call("net.reactivated.Fprint.Device.VerifyStart", 0, "any").Err; err != nil {
 				return fmt.Errorf("VerifyStart on attempt %d: %w", attempt, err)
 			}
 		} else {
 			log.Printf("fprintd: attempt %d/%d, awaiting fingerprint", attempt, maxAttempts)
+		}
+
+		select {
+		case <-time.After(settleDelay):
+		case <-ctx.Done():
+			return fmt.Errorf("fingerprint verification timed out")
+		}
+		if dropped := drainSignals(sigCh); dropped > 0 {
+			log.Printf("fprintd: drained %d phantom signal(s) before attempt %d", dropped, attempt)
 		}
 
 		err := waitForVerifyResult(ctx, sigCh)
@@ -145,6 +156,11 @@ func waitForVerifyResult(ctx context.Context, sigCh <-chan *dbus.Signal) error {
 	for {
 		select {
 		case sig := <-sigCh:
+			if len(sig.Body) >= 2 {
+				name, _ := sig.Body[0].(string)
+				done, _ := sig.Body[1].(bool)
+				log.Printf("fprintd: signal %q done=%v", name, done)
+			}
 			matched, terminal, err := processVerifyStatus(sig.Body)
 			if matched {
 				return nil
