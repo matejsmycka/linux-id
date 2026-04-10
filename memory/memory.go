@@ -85,10 +85,16 @@ func (m *Mem) SignASN1(keyHandle, applicationParam, digest []byte) ([]byte, erro
 		return nil, fmt.Errorf("open child private key err: %w", err)
 	}
 
-	var ecdsaKey ecdsa.PrivateKey
-
-	ecdsaKey.D = new(big.Int).SetBytes(childPrivateKey)
-	ecdsaKey.PublicKey.Curve = elliptic.P256()
+	// Reconstruct the full ecdsa.PrivateKey including the public key.
+	// Go ≥1.20's crypto/ecdsa.SignASN1 validates the curve point in
+	// pointFromAffine and panics on the zero point, so X/Y MUST be set —
+	// it's not optional even when only the private scalar is needed.
+	curve := elliptic.P256()
+	ecdsaKey := ecdsa.PrivateKey{
+		PublicKey: ecdsa.PublicKey{Curve: curve},
+		D:         new(big.Int).SetBytes(childPrivateKey),
+	}
+	ecdsaKey.PublicKey.X, ecdsaKey.PublicKey.Y = curve.ScalarBaseMult(childPrivateKey)
 
 	return ecdsa.SignASN1(rand.Reader, &ecdsaKey, digest)
 }
