@@ -14,9 +14,9 @@ const (
 	StatusCredentialExcluded  = byte(0x19) // credential in excludeList already exists
 	StatusUnsupportedAlg      = byte(0x26)
 	StatusOperationDenied     = byte(0x27)
-	StatusUserActionTimeout   = byte(0x2A)
 	StatusInvalidOption       = byte(0x2C) // uv=true but authenticator cannot verify identity
 	StatusNoCredentials       = byte(0x2E)
+	StatusUserActionTimeout   = byte(0x2F) // CTAP 2.1 §8.2 / FIDO_ERR_USER_ACTION_TIMEOUT
 	StatusNotAllowed          = byte(0x30)
 )
 
