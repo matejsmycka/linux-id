@@ -432,6 +432,84 @@ func TestGetAssertion_AlwaysCallsVerifier(t *testing.T) {
 	}
 }
 
+func TestCachingVerifier_CachesRecentSuccess(t *testing.T) {
+	inner := &fakeVerifier{nextResult: VerifyResult{OK: true}}
+	v := newCachingVerifier(inner)
+
+	ch1, err := v.VerifyUser("first")
+	if err != nil {
+		t.Fatalf("first VerifyUser: %s", err)
+	}
+	if r := <-ch1; !r.OK {
+		t.Fatalf("first result not OK: %+v", r)
+	}
+	if inner.callCount != 1 {
+		t.Fatalf("after first call, inner.callCount = %d, want 1", inner.callCount)
+	}
+
+	ch2, err := v.VerifyUser("second")
+	if err != nil {
+		t.Fatalf("second VerifyUser: %s", err)
+	}
+	if r := <-ch2; !r.OK {
+		t.Fatalf("second result not OK: %+v", r)
+	}
+	if inner.callCount != 1 {
+		t.Errorf("cached call still invoked inner; callCount = %d, want 1", inner.callCount)
+	}
+}
+
+func TestCachingVerifier_DoesNotCacheFailure(t *testing.T) {
+	inner := &fakeVerifier{nextResult: VerifyResult{OK: false}}
+	v := newCachingVerifier(inner)
+
+	ch1, _ := v.VerifyUser("a")
+	if r := <-ch1; r.OK {
+		t.Fatalf("first result must not be OK; got %+v", r)
+	}
+
+	ch2, _ := v.VerifyUser("b")
+	if r := <-ch2; r.OK {
+		t.Errorf("second result must not be OK from cache after a failure; got %+v", r)
+	}
+	if inner.callCount != 2 {
+		t.Errorf("failure must not be cached; inner.callCount = %d, want 2", inner.callCount)
+	}
+}
+
+func TestCachingVerifier_CacheExpires(t *testing.T) {
+	inner := &fakeVerifier{nextResult: VerifyResult{OK: true}}
+	v := newCachingVerifier(inner)
+
+	now := time.Now()
+	v.now = func() time.Time { return now }
+
+	ch1, _ := v.VerifyUser("a")
+	<-ch1
+	if inner.callCount != 1 {
+		t.Fatalf("after first call, inner.callCount = %d, want 1", inner.callCount)
+	}
+
+	now = now.Add(2 * uvCacheTTL)
+
+	ch2, _ := v.VerifyUser("b")
+	<-ch2
+	if inner.callCount != 2 {
+		t.Errorf("expired cache should not short-circuit; inner.callCount = %d, want 2", inner.callCount)
+	}
+}
+
+func TestCachingVerifier_PerformsUVForwardsToInner(t *testing.T) {
+	upOnly := newCachingVerifier(&fakeVerifier{performsUV: false})
+	uvCapable := newCachingVerifier(&fakeVerifier{performsUV: true})
+	if upOnly.PerformsUV() {
+		t.Errorf("PerformsUV() = true for UP-only inner verifier, want false")
+	}
+	if !uvCapable.PerformsUV() {
+		t.Errorf("PerformsUV() = false for UV-capable inner verifier, want true")
+	}
+}
+
 func TestGetAssertion_VerifierRejection(t *testing.T) {
 	cases := []struct {
 		name       string

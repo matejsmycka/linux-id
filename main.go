@@ -12,6 +12,7 @@ import (
 	"flag"
 	"log"
 	"math/big"
+	"sync"
 	"time"
 
 	cbor "github.com/fxamacker/cbor/v2"
@@ -121,6 +122,50 @@ func (v *fprintdVerifier) VerifyUser(prompt string) (<-chan VerifyResult, error)
 
 func (v *fprintdVerifier) PerformsUV() bool { return true }
 
+const uvCacheTTL = 5 * time.Second
+
+type cachingVerifier struct {
+	inner  UserVerifier
+	ttl    time.Duration
+	now    func() time.Time
+	mu     sync.Mutex
+	lastOK time.Time
+}
+
+func newCachingVerifier(inner UserVerifier) *cachingVerifier {
+	return &cachingVerifier{inner: inner, ttl: uvCacheTTL, now: time.Now}
+}
+
+func (v *cachingVerifier) VerifyUser(prompt string) (<-chan VerifyResult, error) {
+	v.mu.Lock()
+	if !v.lastOK.IsZero() && v.now().Sub(v.lastOK) < v.ttl {
+		v.mu.Unlock()
+		log.Print("verifier: UV cache hit, skipping prompt")
+		ch := make(chan VerifyResult, 1)
+		ch <- VerifyResult{OK: true}
+		return ch, nil
+	}
+	v.mu.Unlock()
+
+	innerCh, err := v.inner.VerifyUser(prompt)
+	if err != nil {
+		return nil, err
+	}
+	out := make(chan VerifyResult, 1)
+	go func() {
+		r := <-innerCh
+		if r.OK {
+			v.mu.Lock()
+			v.lastOK = v.now()
+			v.mu.Unlock()
+		}
+		out <- r
+	}()
+	return out, nil
+}
+
+func (v *cachingVerifier) PerformsUV() bool { return v.inner.PerformsUV() }
+
 // pinentryClient is the subset of *pinentry.Pinentry that the U2F handlers
 // use. Exists so handleRegister/handleAuthenticate can be unit-tested with a fake.
 type pinentryClient interface {
@@ -147,12 +192,14 @@ func newServer() *server {
 		cs: ctap2.NewCredStore(),
 	}
 
+	var inner UserVerifier
 	switch *auth {
 	case "fprintd":
-		s.verifier = &fprintdVerifier{fp: fprintd.New()}
+		inner = &fprintdVerifier{fp: fprintd.New()}
 	default:
-		s.verifier = &pinentryVerifier{pe: pe}
+		inner = &pinentryVerifier{pe: pe}
 	}
+	s.verifier = newCachingVerifier(inner)
 
 	if *backend == "tpm" {
 		signer, err := tpm.New(*device)
