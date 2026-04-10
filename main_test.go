@@ -432,22 +432,74 @@ func TestGetAssertion_AlwaysCallsVerifier(t *testing.T) {
 	}
 }
 
-// If verification is rejected (cancel / scan failure), the assertion MUST NOT
-// be returned. The signed authenticatorData would lie about user presence.
 func TestGetAssertion_VerifierRejection(t *testing.T) {
-	verifier := &fakeVerifier{nextResult: VerifyResult{OK: false}}
-	s := newTestServer(t, verifier, &fakePinentry{})
-	credID := registerCred(t, s, "example.com", "Example", "alice", false)
-	verifier.nextResult = VerifyResult{OK: false} // re-arm after register
+	cases := []struct {
+		name       string
+		failResult VerifyResult
+		wantStatus byte
+	}{
+		{
+			name:       "user canceled (no Reason)",
+			failResult: VerifyResult{OK: false},
+			wantStatus: ctap2.StatusOperationDenied,
+		},
+		{
+			name:       "fingerprint no-match",
+			failResult: VerifyResult{OK: false, Reason: ReasonNoMatch},
+			wantStatus: ctap2.StatusUVInvalid,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
+			s := newTestServer(t, verifier, &fakePinentry{})
+			credID := registerCred(t, s, "reject.example", "Reject", "user", false)
 
-	resp := &fakeResponder{}
-	payload := makeAssertionCBOR(t, "example.com",
-		[]ctap2.CredDescriptor{{Type: "public-key", ID: credID}},
-		nil)
-	s.handleGetAssertion(context.Background(), resp, fidohid.AuthEvent{}, payload)
+			verifier.nextResult = tc.failResult
 
-	if got := resp.lastCtap2().status; got != ctap2.StatusOperationDenied {
-		t.Fatalf("expected StatusOperationDenied (0x27), got 0x%02x", got)
+			resp := &fakeResponder{}
+			payload := makeAssertionCBOR(t, "reject.example",
+				[]ctap2.CredDescriptor{{Type: "public-key", ID: credID}},
+				nil)
+			s.handleGetAssertion(context.Background(), resp, fidohid.AuthEvent{}, payload)
+
+			if got := resp.lastCtap2().status; got != tc.wantStatus {
+				t.Fatalf("expected 0x%02x, got 0x%02x", tc.wantStatus, got)
+			}
+		})
+	}
+}
+
+func TestMakeCredential_VerifierRejection(t *testing.T) {
+	cases := []struct {
+		name       string
+		failResult VerifyResult
+		wantStatus byte
+	}{
+		{
+			name:       "user canceled (no Reason)",
+			failResult: VerifyResult{OK: false},
+			wantStatus: ctap2.StatusOperationDenied,
+		},
+		{
+			name:       "fingerprint no-match",
+			failResult: VerifyResult{OK: false, Reason: ReasonNoMatch},
+			wantStatus: ctap2.StatusUVInvalid,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			verifier := &fakeVerifier{performsUV: true, nextResult: tc.failResult}
+			s := newTestServer(t, verifier, &fakePinentry{})
+
+			resp := &fakeResponder{}
+			payload := makeMakeCredCBOR(t, "reject-mc.example", "Reject MC", "user", false, false)
+			s.handleMakeCredential(context.Background(), resp, fidohid.AuthEvent{}, payload)
+
+			if got := resp.lastCtap2().status; got != tc.wantStatus {
+				t.Fatalf("expected 0x%02x, got 0x%02x", tc.wantStatus, got)
+			}
+		})
 	}
 }
 
@@ -1654,10 +1706,9 @@ func TestStatusCodeValuesMatchSpec(t *testing.T) {
 		{"StatusOperationDenied", ctap2.StatusOperationDenied, 0x27},
 		{"StatusInvalidOption", ctap2.StatusInvalidOption, 0x2C},
 		{"StatusNoCredentials", ctap2.StatusNoCredentials, 0x2E},
-		// 0x2F per CTAP 2.1 §8.2 / FIDO_ERR_USER_ACTION_TIMEOUT.
-		// 0x2A is FIDO_ERR_NO_OPERATION_PENDING — a different error.
 		{"StatusUserActionTimeout", ctap2.StatusUserActionTimeout, 0x2F},
 		{"StatusNotAllowed", ctap2.StatusNotAllowed, 0x30},
+		{"StatusUVInvalid", ctap2.StatusUVInvalid, 0x3F},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
