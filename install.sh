@@ -3,6 +3,7 @@
 set -o pipefail
 
 executable=linux-id
+release_url="https://github.com/matejsmycka/linux-id/releases/latest/download/linux-id_Linux_x86_64.tar.gz"
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 
 auth_mode="pinentry"
@@ -69,8 +70,15 @@ function check_prereqs() {
         exit 1
     fi
 
-    if [ ! -f "$script_dir/$executable" ] && ! command -v go &>/dev/null; then
-        echo "Need a prebuilt ./linux-id binary or 'go' to build one" >&2
+    # Either we're in a source clone (go.mod + go) and build, or we download
+    # the latest release tarball with curl/wget. No stale local binary path,
+    # so re-running install.sh always picks up the latest published version.
+    if [ -f "$script_dir/go.mod" ] && command -v go &>/dev/null; then
+        :
+    elif command -v curl &>/dev/null || command -v wget &>/dev/null; then
+        :
+    else
+        echo "Need (go.mod + go) to build, or curl/wget to download the binary" >&2
         exit 1
     fi
 
@@ -141,14 +149,33 @@ function migrate_old_install() {
 }
 
 function make_executable() {
-    if [ -f "$script_dir/$executable" ]; then
-        echo "Using existing binary: $script_dir/$executable"
-    else
+    local source_binary
+
+    if [ -f "$script_dir/go.mod" ] && command -v go &>/dev/null; then
+        echo "Building $executable from source in $script_dir"
         ( cd "$script_dir" && go build -o "$executable" )
         handle "Failed to build executable with go"
+        source_binary="$script_dir/$executable"
+    else
+        local tmp
+        tmp="$(mktemp -d)"
+        trap 'rm -rf "$tmp"' EXIT
+        echo "Downloading latest binary from $release_url"
+        if command -v curl &>/dev/null; then
+            curl -fsSL "$release_url" | tar -xz -C "$tmp"
+        else
+            wget -qO- "$release_url" | tar -xz -C "$tmp"
+        fi
+        handle "Failed to download or extract the prebuilt binary"
+        if [ ! -f "$tmp/$executable" ]; then
+            echo "Tarball did not contain '$executable':" >&2
+            ls -la "$tmp" >&2
+            exit 1
+        fi
+        source_binary="$tmp/$executable"
     fi
 
-    sudo install -Dm755 "$script_dir/$executable" /usr/bin/"$executable"
+    sudo install -Dm755 "$source_binary" /usr/bin/"$executable"
     handle "Failed to install executable to /usr/bin"
 }
 
