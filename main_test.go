@@ -530,6 +530,225 @@ func TestGetAssertion_UserEntityUsesStringKeys(t *testing.T) {
 	}
 }
 
+// CTAP2 §6 mandates canonical CBOR encoding for all responses. The user
+// entity sub-map keys must be sorted (length-first or bytewise — both
+// produce id, name, displayName for these particular keys). Default
+// cbor.Marshal does NOT sort, so this test catches any regression that
+// removes the dedicated CTAP2EncOptions encoder.
+func TestGetAssertion_ResponseIsCanonicalCBOR(t *testing.T) {
+	verifier := &fakeVerifier{nextResult: VerifyResult{OK: true}}
+	s := newTestServer(t, verifier, &fakePinentry{})
+	registerCred(t, s, "canonical.example", "Canonical", "user", true)
+
+	resp := &fakeResponder{}
+	payload := makeAssertionCBOR(t, "canonical.example", nil, nil)
+	s.handleGetAssertion(context.Background(), resp, fidohid.AuthEvent{}, payload)
+
+	if resp.lastCtap2().status != ctap2.StatusOK {
+		t.Fatalf("status=0x%02x", resp.lastCtap2().status)
+	}
+	top := decodeAssertion(t, resp.lastCtap2().data)
+
+	// Top-level integer keys must be in ascending order.
+	rawTop := resp.lastCtap2().data
+	intOrder, err := readMapIntKeyOrder(rawTop)
+	if err != nil {
+		t.Fatalf("read top key order: %s", err)
+	}
+	for i := 1; i < len(intOrder); i++ {
+		if intOrder[i] < intOrder[i-1] {
+			t.Errorf("top-level keys not sorted ascending: %v", intOrder)
+			break
+		}
+	}
+
+	// User entity (field 4) sub-map keys must be sorted (CTAP2 bytewise lexical
+	// order of CBOR-encoded keys). For {"id","name","displayName"} that's id,
+	// name, displayName.
+	userBytes := top[4]
+	strOrder, err := readMapStringKeyOrder(userBytes)
+	if err != nil {
+		t.Fatalf("read user key order: %s", err)
+	}
+	want := []string{"id", "name", "displayName"}
+	if fmt.Sprintf("%v", strOrder) != fmt.Sprintf("%v", want) {
+		t.Errorf("user entity key order = %v, want %v (CTAP2 canonical)", strOrder, want)
+	}
+}
+
+// readMapIntKeyOrder walks the top-level map of a CBOR document and returns
+// the integer keys in the order they were emitted. Used to verify CTAP2
+// canonical encoding (sorted ascending).
+func readMapIntKeyOrder(b []byte) ([]int, error) {
+	dec := cbor.NewDecoder(bytes.NewReader(b))
+	var raw cbor.RawMessage
+	if err := dec.Decode(&raw); err != nil {
+		return nil, err
+	}
+	// Re-decode as ordered key-value pairs by reading element-by-element.
+	if len(raw) < 1 {
+		return nil, errors.New("empty cbor")
+	}
+	mt := raw[0] >> 5
+	if mt != 5 {
+		return nil, fmt.Errorf("not a map: major type %d", mt)
+	}
+	// Decode into a temporary structure that preserves order via cbor.RawTag-style
+	// trick: marshal/unmarshal through []cbor.RawMessage of pairs is complex, so
+	// instead use the slim approach of decoding into map and re-checking encoded
+	// bytes. For this test we walk the bytes manually.
+	pos := 1
+	count := int(raw[0] & 0x1f)
+	if count == 0x18 {
+		count = int(raw[1])
+		pos = 2
+	} else if count == 0x19 {
+		count = int(raw[1])<<8 | int(raw[2])
+		pos = 3
+	}
+	out := make([]int, 0, count)
+	for i := 0; i < count; i++ {
+		// Read int key
+		k, n, err := readInt(raw[pos:])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+		pos += n
+		// Skip the value
+		vn, err := skipItem(raw[pos:])
+		if err != nil {
+			return nil, err
+		}
+		pos += vn
+	}
+	return out, nil
+}
+
+func readMapStringKeyOrder(raw []byte) ([]string, error) {
+	if len(raw) < 1 {
+		return nil, errors.New("empty cbor")
+	}
+	mt := raw[0] >> 5
+	if mt != 5 {
+		return nil, fmt.Errorf("not a map: major type %d", mt)
+	}
+	pos := 1
+	count := int(raw[0] & 0x1f)
+	if count == 0x18 {
+		count = int(raw[1])
+		pos = 2
+	}
+	out := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		// Read string key (major type 3)
+		if raw[pos]>>5 != 3 {
+			return nil, fmt.Errorf("expected string key, got major type %d", raw[pos]>>5)
+		}
+		slen := int(raw[pos] & 0x1f)
+		pos++
+		if slen == 0x18 {
+			slen = int(raw[pos])
+			pos++
+		}
+		out = append(out, string(raw[pos:pos+slen]))
+		pos += slen
+		// Skip value
+		vn, err := skipItem(raw[pos:])
+		if err != nil {
+			return nil, err
+		}
+		pos += vn
+	}
+	return out, nil
+}
+
+func readInt(b []byte) (int, int, error) {
+	if len(b) == 0 {
+		return 0, 0, errors.New("empty")
+	}
+	mt := b[0] >> 5
+	if mt != 0 && mt != 1 {
+		return 0, 0, fmt.Errorf("not an int: mt=%d", mt)
+	}
+	v := int(b[0] & 0x1f)
+	n := 1
+	if v == 0x18 {
+		v = int(b[1])
+		n = 2
+	} else if v == 0x19 {
+		v = int(b[1])<<8 | int(b[2])
+		n = 3
+	}
+	if mt == 1 {
+		v = -1 - v
+	}
+	return v, n, nil
+}
+
+// skipItem advances past one CBOR item and returns the bytes consumed.
+// Supports the small subset (ints, byte strings, text strings, arrays, maps,
+// floats, bool, null) needed by these tests.
+func skipItem(b []byte) (int, error) {
+	if len(b) == 0 {
+		return 0, errors.New("empty")
+	}
+	mt := b[0] >> 5
+	low := b[0] & 0x1f
+	pos := 1
+	var arg uint64
+	switch {
+	case low < 24:
+		arg = uint64(low)
+	case low == 24:
+		arg = uint64(b[pos])
+		pos++
+	case low == 25:
+		arg = uint64(b[pos])<<8 | uint64(b[pos+1])
+		pos += 2
+	case low == 26:
+		arg = uint64(b[pos])<<24 | uint64(b[pos+1])<<16 | uint64(b[pos+2])<<8 | uint64(b[pos+3])
+		pos += 4
+	case low == 27:
+		for i := 0; i < 8; i++ {
+			arg = arg<<8 | uint64(b[pos+i])
+		}
+		pos += 8
+	default:
+		return 0, fmt.Errorf("unsupported low %d", low)
+	}
+	switch mt {
+	case 0, 1, 7: // unsigned, negative, simple — done
+		return pos, nil
+	case 2, 3: // byte string, text string
+		return pos + int(arg), nil
+	case 4: // array
+		for i := uint64(0); i < arg; i++ {
+			n, err := skipItem(b[pos:])
+			if err != nil {
+				return 0, err
+			}
+			pos += n
+		}
+		return pos, nil
+	case 5: // map
+		for i := uint64(0); i < arg; i++ {
+			n, err := skipItem(b[pos:]) // key
+			if err != nil {
+				return 0, err
+			}
+			pos += n
+			n, err = skipItem(b[pos:]) // value
+			if err != nil {
+				return 0, err
+			}
+			pos += n
+		}
+		return pos, nil
+	}
+	return 0, fmt.Errorf("unsupported major type %d", mt)
+}
+
 // The signature in field 3 must verify against the assertion's authData ||
 // clientDataHash. Catches any change that breaks the signing input.
 func TestGetAssertion_SignatureCoversAuthDataAndClientDataHash(t *testing.T) {
