@@ -61,6 +61,21 @@ func verifyFingerprint() error {
 	}
 
 	device := conn.Object("net.reactivated.Fprint", devices[0])
+
+	// Subscribe to VerifyStatus signals BEFORE VerifyStart so the first
+	// status update from the sensor cannot race ahead of our channel.
+	// Scoping by sender + object path keeps the match strict.
+	if err := conn.AddMatchSignal(
+		dbus.WithMatchSender("net.reactivated.Fprint"),
+		dbus.WithMatchInterface("net.reactivated.Fprint.Device"),
+		dbus.WithMatchMember("VerifyStatus"),
+		dbus.WithMatchObjectPath(devices[0]),
+	); err != nil {
+		return err
+	}
+	sigCh := make(chan *dbus.Signal, 4)
+	conn.Signal(sigCh)
+
 	if err := device.Call("net.reactivated.Fprint.Device.Claim", 0, "").Err; err != nil {
 		return err
 	}
@@ -71,21 +86,14 @@ func verifyFingerprint() error {
 	}
 	defer device.Call("net.reactivated.Fprint.Device.VerifyStop", 0)
 
-	if err := conn.AddMatchSignal(
-		dbus.WithMatchInterface("net.reactivated.Fprint.Device"),
-		dbus.WithMatchMember("VerifyStatus"),
-	); err != nil {
-		return err
-	}
-
-	sigCh := make(chan *dbus.Signal, 1)
-	conn.Signal(sigCh)
-
 	for {
 		select {
 		case sig := <-sigCh:
-			result := sig.Body[0].(string)
-			done := sig.Body[1].(bool)
+			if len(sig.Body) < 2 {
+				continue // malformed signal — keep waiting
+			}
+			result, _ := sig.Body[0].(string)
+			done, _ := sig.Body[1].(bool)
 			if result == "verify-match" {
 				return nil
 			}
