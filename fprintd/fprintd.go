@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -13,10 +14,20 @@ import (
 var ErrNoMatch = errors.New("fprintd: fingerprint did not match an enrolled finger")
 
 const (
-	maxAttempts    = 3
-	attemptGap     = 200 * time.Millisecond
-	totalDeadline  = 30 * time.Second
+	maxAttempts   = 3
+	attemptGap    = 500 * time.Millisecond
+	totalDeadline = 30 * time.Second
 )
+
+func drainSignals(ch <-chan *dbus.Signal) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
+}
 
 type Result struct {
 	OK    bool
@@ -102,26 +113,33 @@ func verifyFingerprint() error {
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt > 1 {
+			log.Printf("fprintd: attempt %d/%d (previous: no-match), restarting verify", attempt, maxAttempts)
 			device.Call("net.reactivated.Fprint.Device.VerifyStop", 0)
 			select {
 			case <-time.After(attemptGap):
 			case <-ctx.Done():
 				return fmt.Errorf("fingerprint verification timed out")
 			}
+			drainSignals(sigCh)
 			if err := device.Call("net.reactivated.Fprint.Device.VerifyStart", 0, "any").Err; err != nil {
 				return fmt.Errorf("VerifyStart on attempt %d: %w", attempt, err)
 			}
+		} else {
+			log.Printf("fprintd: attempt %d/%d, awaiting fingerprint", attempt, maxAttempts)
 		}
 
 		err := waitForVerifyResult(ctx, sigCh)
 		if err == nil {
+			log.Printf("fprintd: attempt %d/%d matched", attempt, maxAttempts)
 			return nil
 		}
 		if !errors.Is(err, ErrNoMatch) {
+			log.Printf("fprintd: attempt %d/%d terminal failure: %v", attempt, maxAttempts, err)
 			return err
 		}
 		lastErr = err
 	}
+	log.Printf("fprintd: all %d attempts exhausted with no match", maxAttempts)
 	return lastErr
 }
 
