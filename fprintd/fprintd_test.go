@@ -1,8 +1,12 @@
 package fprintd
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
+
+	"github.com/godbus/dbus/v5"
 )
 
 func TestProcessVerifyStatus(t *testing.T) {
@@ -103,6 +107,81 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+func TestWaitForVerifyResult(t *testing.T) {
+	feed := func(bodies ...[]interface{}) <-chan *dbus.Signal {
+		ch := make(chan *dbus.Signal, len(bodies))
+		for _, b := range bodies {
+			ch <- &dbus.Signal{Body: b}
+		}
+		return ch
+	}
+
+	t.Run("success on first signal", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		err := waitForVerifyResult(ctx, feed([]interface{}{"verify-match", true}))
+		if err != nil {
+			t.Errorf("err = %v, want nil", err)
+		}
+	})
+
+	t.Run("no-match returns ErrNoMatch", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		err := waitForVerifyResult(ctx, feed([]interface{}{"verify-no-match", true}))
+		if !errors.Is(err, ErrNoMatch) {
+			t.Errorf("err = %v, want ErrNoMatch", err)
+		}
+	})
+
+	t.Run("non-terminal scan then success", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		err := waitForVerifyResult(ctx, feed(
+			[]interface{}{"verify-retry-scan", false},
+			[]interface{}{"verify-swipe-too-short", false},
+			[]interface{}{"verify-match", true},
+		))
+		if err != nil {
+			t.Errorf("err = %v, want nil", err)
+		}
+	})
+
+	t.Run("non-terminal scans then no-match", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		err := waitForVerifyResult(ctx, feed(
+			[]interface{}{"verify-finger-not-centered", false},
+			[]interface{}{"verify-no-match", true},
+		))
+		if !errors.Is(err, ErrNoMatch) {
+			t.Errorf("err = %v, want ErrNoMatch", err)
+		}
+	})
+
+	t.Run("disconnected returns wrapped error", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		err := waitForVerifyResult(ctx, feed([]interface{}{"verify-disconnected", true}))
+		if err == nil {
+			t.Errorf("err = nil, want disconnect error")
+		}
+		if errors.Is(err, ErrNoMatch) {
+			t.Errorf("disconnect must not be reported as no-match")
+		}
+	})
+
+	t.Run("context deadline returns timeout", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+		defer cancel()
+		empty := make(chan *dbus.Signal)
+		err := waitForVerifyResult(ctx, empty)
+		if err == nil {
+			t.Errorf("err = nil, want timeout error")
+		}
+	})
 }
 
 func TestProcessVerifyStatus_NoPanicOnAnyBody(t *testing.T) {
