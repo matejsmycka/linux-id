@@ -30,6 +30,18 @@ var backend = flag.String("backend", "tpm", "tpm|memory")
 var device = flag.String("device", "/dev/tpmrm0", "TPM device path")
 var auth = flag.String("auth", "pinentry", "pinentry|fprintd — pinentry confirms presence (UP only); fprintd verifies identity via fingerprint (UP+UV)")
 
+// ctap2Enc is the CTAP2 Canonical CBOR encoder. Per CTAP §6, all CTAP2
+// messages must use canonical encoding (sorted keys, shortest-form integers,
+// definite-length items). The default cbor.Marshal does not enforce this and
+// emits map keys in Go iteration order, which some clients reject.
+var ctap2Enc cbor.EncMode = func() cbor.EncMode {
+	em, err := cbor.CTAP2EncOptions().EncMode()
+	if err != nil {
+		panic(err)
+	}
+	return em
+}()
+
 // tokenResponder is the subset of *fidohid.SoftToken that the request handlers
 // need to write replies. It exists so handlers can be unit-tested with a fake.
 type tokenResponder interface {
@@ -436,7 +448,7 @@ func (s *server) handleGetInfo(ctx context.Context, token tokenResponder, evt fi
 		4: options,
 		5: 1200, // maxMsgSize
 	}
-	encoded, err := cbor.Marshal(response)
+	encoded, err := ctap2Enc.Marshal(response)
 	if err != nil {
 		log.Printf("GetInfo marshal err: %s", err)
 		token.WriteCtap2Response(ctx, evt, ctap2.StatusInvalidCbor, nil)
@@ -541,7 +553,7 @@ func (s *server) handleMakeCredential(ctx context.Context, token tokenResponder,
 		-2: xBytes, // x
 		-3: yBytes, // y
 	}
-	coseKeyBytes, err := cbor.Marshal(coseKey)
+	coseKeyBytes, err := ctap2Enc.Marshal(coseKey)
 	if err != nil {
 		log.Printf("MakeCredential coseKey marshal err: %s", err)
 		token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
@@ -572,7 +584,7 @@ func (s *server) handleMakeCredential(ctx context.Context, token tokenResponder,
 		2: authDataBytes,
 		3: map[interface{}]interface{}{},
 	}
-	encoded, err := cbor.Marshal(response)
+	encoded, err := ctap2Enc.Marshal(response)
 	if err != nil {
 		log.Printf("MakeCredential response marshal err: %s", err)
 		token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
@@ -718,7 +730,7 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 			"displayName": storedCred.DisplayName,
 		}
 	}
-	encoded, err := cbor.Marshal(response)
+	encoded, err := ctap2Enc.Marshal(response)
 	if err != nil {
 		log.Printf("GetAssertion response marshal err: %s", err)
 		token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
