@@ -4,24 +4,29 @@ Linux-id is FIDO token implementation for Linux that protects the token keys by 
 
 ## Setup
 
-You can install linux-id by running the following commands:
-
 ```bash
 git clone git@github.com:matejsmycka/linux-id.git
 cd linux-id
-
 chmod +x install.sh
 ./install.sh
 ```
 
-This will set up Linux-id persistently on your machine; note that this will autostart Linux-id on login.
+`install.sh` builds the binary, installs it to `/usr/bin/linux-id`, ships a systemd **user** unit at `/usr/lib/systemd/user/linux-id.service` and udev rules at `/usr/lib/udev/rules.d/60-linux-id-fido-tpm.rules` (paths and contents byte-identical to the [AUR package](https://aur.archlinux.org/packages/linux-id)), then enables and starts the service.
 
-Or you can skip compiling with the download of the latest release.
+Log out and back in once so the `uaccess` udev tag grants your session access to `/dev/uhid` and `/dev/tpmrm0`.
+
+### Service control
+
+The unit is per-user, so commands take `--user` and **no sudo**:
 
 ```bash
-curl -L https://github.com/matejsmycka/linux-id/releases/latest/download/linux-id_Linux_x86_64.tar.gz | tar xz
-chmod +x linux-id
+systemctl --user status linux-id          # current state
+systemctl --user restart linux-id         # restart
+journalctl --user -u linux-id -f          # tail logs
+systemctl --user disable --now linux-id   # stop and don't autostart
 ```
+
+Or install [the AUR package](https://aur.archlinux.org/packages/linux-id) directly: `paru -S linux-id`.
 
 ## Test
 
@@ -60,29 +65,6 @@ When a site requests `rk=true` (resident key), linux-id stores the credential lo
 ## Future work
 
 - [ ] Add to linux distro package managers
-
-## Manual setup
-
-In order to run `linux-id` you will need permission to access `/dev/tpmrm0`. On Ubuntu and Arch, you can add your user to the `tss` group.
-
-Your user also needs permission to access `/dev/uhid` so that `linux-id` can appear to be a USB device.
-I use the following udev rule to set the appropriate `uhid` permissions:
-
-```
-KERNEL=="uhid", SUBSYSTEM=="misc", GROUP="SOME_UHID_GROUP_MY_USER_BELONGS_TO", MODE="0660"
-```
-
-To ensure the above udev rule gets triggered, I also add the `uhid` module to `/etc/modules-load.d/uhid.conf` so that it loads at boot.
-
-To run:
-
-```
-# as a user that has permission to read and write to /dev/tpmrm0:
-./linux-id
-```
-Note: do not run with `sudo` or as root, as it will not work.
-
-Make linux-id executable start automatically on login via systemd or autostart.
 
 ##  Implementation details
 
