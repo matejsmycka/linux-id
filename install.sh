@@ -18,10 +18,8 @@ function check_prereqs() {
         exit 1
     fi
 
-    if [ ! -f "$script_dir/$executable" ] \
-        && ! command -v go &>/dev/null \
-        && ! command -v podman &>/dev/null; then
-        echo "Need a prebuilt ./linux-id, go, or podman to obtain the binary" >&2
+    if [ ! -f "$script_dir/$executable" ] && ! command -v go &>/dev/null; then
+        echo "Need a prebuilt ./linux-id binary or 'go' to build one" >&2
         exit 1
     fi
 
@@ -88,13 +86,9 @@ function migrate_old_install() {
 function make_executable() {
     if [ -f "$script_dir/$executable" ]; then
         echo "Using existing binary: $script_dir/$executable"
-    elif command -v go &>/dev/null; then
+    else
         ( cd "$script_dir" && go build -o "$executable" )
         handle "Failed to build executable with go"
-    else
-        ( cd "$script_dir" && podman run --rm -v "$PWD:/workdir:Z" -w "/workdir" \
-            golang:latest go build -o "$executable" )
-        handle "Failed to build executable with podman"
     fi
 
     sudo install -Dm755 "$script_dir/$executable" /usr/bin/"$executable"
