@@ -5,6 +5,57 @@ set -o pipefail
 executable=linux-id
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 
+auth_mode="pinentry"
+
+function usage() {
+    cat <<EOF
+Usage: $0 [--auth pinentry|fprintd] [-h|--help]
+
+Options:
+  --auth pinentry   Confirm presence with a click dialog (default).
+  --auth fprintd    Confirm presence with a fingerprint scan.
+                    Requires fprintd installed and a fingerprint enrolled
+                    via 'fprintd-enroll'. Sets the WebAuthn UV flag.
+  -h, --help        Show this help.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --auth)
+            auth_mode="$2"
+            shift 2
+            ;;
+        --auth=*)
+            auth_mode="${1#--auth=}"
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+case "$auth_mode" in
+    pinentry|fprintd) ;;
+    *)
+        echo "Invalid --auth value: $auth_mode (must be 'pinentry' or 'fprintd')" >&2
+        exit 1
+        ;;
+esac
+
+if [ "$auth_mode" = "fprintd" ]; then
+    auth_arg=" --auth fprintd"
+else
+    auth_arg=""
+fi
+
 function handle() {
     if [ $? -ne 0 ]; then
         echo "$1" >&2
@@ -25,6 +76,12 @@ function check_prereqs() {
 
     if ! command -v pinentry &>/dev/null; then
         echo "pinentry is not installed, please install it" >&2
+        exit 1
+    fi
+
+    if [ "$auth_mode" = "fprintd" ] && ! command -v fprintd-enroll &>/dev/null; then
+        echo "--auth fprintd requested but fprintd is not installed" >&2
+        echo "Install fprintd first, then run 'fprintd-enroll' to enroll a finger" >&2
         exit 1
     fi
 
@@ -96,7 +153,7 @@ function make_executable() {
 }
 
 function install_unit_and_rules() {
-    sudo install -Dm644 /dev/stdin /usr/lib/systemd/user/linux-id.service <<'EOF'
+    sudo install -Dm644 /dev/stdin /usr/lib/systemd/user/linux-id.service <<EOF
 [Unit]
 Description=linux-id TPM service
 Documentation=https://github.com/matejsmycka/linux-id
@@ -107,10 +164,10 @@ ConditionKernelModuleLoaded=uhid
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/linux-id
+ExecStart=/usr/bin/linux-id${auth_arg}
 
 ProtectProc=noaccess
-# pinentry may need to access /run/user/$UID/wayland-0
+# pinentry may need to access /run/user/\$UID/wayland-0
 BindReadOnlyPaths=%t
 # pinentry may need to access /tmp/.X11-unix
 BindReadOnlyPaths=%T/.X11-unix
@@ -182,6 +239,8 @@ function enable_user_service() {
     systemctl --user --no-pager status linux-id.service || true
 }
 
+echo "Installing linux-id (auth=$auth_mode)"
+
 check_prereqs
 check_aur_install
 migrate_old_install
@@ -190,5 +249,5 @@ install_unit_and_rules
 enable_user_service
 
 echo
-echo "Installation successful. Log out and back in (or reboot) so the new"
-echo "udev rules and user systemd unit are picked up."
+echo "Installation successful (auth=$auth_mode). Log out and back in (or reboot)"
+echo "so the new udev rules and user systemd unit are picked up."
