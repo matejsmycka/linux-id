@@ -4,24 +4,31 @@ Linux-id is FIDO token implementation for Linux that protects the token keys by 
 
 ## Setup
 
-You can install linux-id by running the following commands:
 
 ```bash
-git clone git@github.com:matejsmycka/linux-id.git
-cd linux-id
-
+curl -O https://raw.githubusercontent.com/matejsmycka/linux-id/refs/heads/main/install.sh
 chmod +x install.sh
+# Read what the script does before running it
 ./install.sh
 ```
 
-This will set up Linux-id persistently on your machine; note that this will autostart Linux-id on login.
-
-Or you can skip compiling with the download of the latest release.
+To use fingerprint authentication, install with `--auth fprintd`.
 
 ```bash
-curl -L https://github.com/matejsmycka/linux-id/releases/latest/download/linux-id_Linux_x86_64.tar.gz | tar xz
-chmod +x linux-id
+./install.sh --auth fprintd
 ```
+
+### Non-official
+
+#### AUR
+
+If you're using an Arch-based system, you can install linux-id from the AUR.
+```bash
+yay -Syy linux-id
+```
+
+[https://aur.archlinux.org/packages/linux-id](https://aur.archlinux.org/packages/linux-id)
+
 
 ## Test
 
@@ -38,6 +45,7 @@ However, after a discussion with the author, I have decided to create a new repo
 - I have updated old methods according to the latest Go standards.
 - Old dependencies (e.g. pinetry) were replaced with updated ones.
 - UX improvements.
+- CTAP2 (biometric) support.
 
 ## CTAP2 / Passkeys
 
@@ -61,29 +69,6 @@ When a site requests `rk=true` (resident key), linux-id stores the credential lo
 
 - [ ] Add to linux distro package managers
 
-## Manual setup
-
-In order to run `linux-id` you will need permission to access `/dev/tpmrm0`. On Ubuntu and Arch, you can add your user to the `tss` group.
-
-Your user also needs permission to access `/dev/uhid` so that `linux-id` can appear to be a USB device.
-I use the following udev rule to set the appropriate `uhid` permissions:
-
-```
-KERNEL=="uhid", SUBSYSTEM=="misc", GROUP="SOME_UHID_GROUP_MY_USER_BELONGS_TO", MODE="0660"
-```
-
-To ensure the above udev rule gets triggered, I also add the `uhid` module to `/etc/modules-load.d/uhid.conf` so that it loads at boot.
-
-To run:
-
-```
-# as a user that has permission to read and write to /dev/tpmrm0:
-./linux-id
-```
-Note: do not run with `sudo` or as root, as it will not work.
-
-Make linux-id executable start automatically on login via systemd or autostart.
-
 ##  Implementation details
 
 linux-id uses the TPM 2.0 API. The overall design is as follows:
@@ -99,12 +84,6 @@ On an authentication request, linux-id will attempt to load the primary key by i
 linux-id requires `pinentry` to be available on the system. If you have gpg installed you most likely already have `pinentry`.
 
 For fingerprint authentication (`--auth fprintd`), `fprintd` must be installed and running.
-
-You will need one of the following (only for compiling):
-
-- `go` with version 1.22 or higher.
-- `podman` to compile in a container.
-- `docker` to compile in a container.
 
 ## Pinentry configuration
 
