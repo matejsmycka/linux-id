@@ -21,6 +21,7 @@ func New(ctx context.Context, name string) (*SoftToken, error) {
 	d.Data.Bus = busUSB
 	d.Data.VendorID = vendorID
 	d.Data.ProductID = productID
+	d.SetUniq("linux-id")
 
 	evtChan, err := d.Open(ctx)
 	if err != nil {
