@@ -131,11 +131,6 @@ function migrate_old_install() {
         sudo rm -f /etc/udev/rules.d/70-uhid.rules
     fi
 
-    if [ -f /etc/modules-load.d/uhid.conf ]; then
-        echo "Removing old modules-load entry: /etc/modules-load.d/uhid.conf"
-        sudo rm -f /etc/modules-load.d/uhid.conf
-    fi
-
     if id -nG "$USER" | grep -qw tss; then
         echo "Note: user is still in the 'tss' group from a previous install."
         echo "      The new udev rule no longer needs it; you may run:"
@@ -184,8 +179,6 @@ function install_unit_and_rules() {
 [Unit]
 Description=linux-id TPM service
 Documentation=https://github.com/matejsmycka/linux-id
-Wants=modprobe@uhid.service
-After=modprobe@uhid.service
 ConditionSecurity=tpm2
 ConditionKernelModuleLoaded=uhid
 
@@ -238,8 +231,18 @@ KERNEL=="tpmrm0", SUBSYSTEM=="tpmrm", TAG+="uaccess"
 EOF
     handle "Failed to install udev rules"
 
+    sudo install -Dm644 /dev/stdin /usr/lib/modules-load.d/uhid.conf <<'EOF'
+uhid
+EOF
+    handle "Failed to install modules-load entry"
+
     sudo udevadm control --reload-rules
     sudo udevadm trigger --subsystem-match=misc --subsystem-match=tpmrm
+
+    if ! lsmod | grep -qw uhid; then
+        sudo modprobe uhid
+        handle "Failed to load uhid kernel module"
+    fi
 }
 
 function enable_user_service() {
