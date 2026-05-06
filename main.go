@@ -10,8 +10,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"math/big"
+	"os"
 	"sync"
 	"time"
 
@@ -166,6 +168,34 @@ func (v *cachingVerifier) VerifyUser(prompt string) (<-chan VerifyResult, error)
 
 func (v *cachingVerifier) PerformsUV() bool { return v.inner.PerformsUV() }
 
+const (
+	deviceOpenAttempts = 10
+	deviceOpenDelay    = 200 * time.Millisecond
+)
+
+func openWithRetry[T any](label string, fn func() (T, error)) (T, error) {
+	var zero T
+	var lastErr error
+	for i := 1; i <= deviceOpenAttempts; i++ {
+		v, err := fn()
+		if err == nil {
+			if i > 1 {
+				log.Printf("%s: opened on attempt %d/%d", label, i, deviceOpenAttempts)
+			}
+			return v, nil
+		}
+		if !errors.Is(err, os.ErrPermission) {
+			return zero, err
+		}
+		lastErr = err
+		log.Printf("%s: not yet accessible (attempt %d/%d), waiting %v",
+			label, i, deviceOpenAttempts, deviceOpenDelay)
+		time.Sleep(deviceOpenDelay)
+	}
+	return zero, fmt.Errorf("%s: not accessible after %d attempts: %w",
+		label, deviceOpenAttempts, lastErr)
+}
+
 // pinentryClient is the subset of *pinentry.Pinentry that the U2F handlers
 // use. Exists so handleRegister/handleAuthenticate can be unit-tested with a fake.
 type pinentryClient interface {
@@ -202,7 +232,9 @@ func newServer() *server {
 	s.verifier = newCachingVerifier(inner)
 
 	if *backend == "tpm" {
-		signer, err := tpm.New(*device)
+		signer, err := openWithRetry("tpm", func() (*tpm.TPM, error) {
+			return tpm.New(*device)
+		})
 		if err != nil {
 			panic(err)
 		}
@@ -226,7 +258,9 @@ func (s *server) run() {
 		log.Printf("warning: no gui pinentry binary detected in PATH. linux-id may not work correctly without a gui based pinentry")
 	}
 
-	token, err := fidohid.New(ctx, "linux-id")
+	token, err := openWithRetry("fidohid", func() (*fidohid.SoftToken, error) {
+		return fidohid.New(ctx, "linux-id")
+	})
 	if err != nil {
 		log.Fatalf("create fido hid error: %s", err)
 	}
