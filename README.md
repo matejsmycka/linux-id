@@ -31,6 +31,8 @@ yay -Syy linux-id
 
 #### Fedora
 
+[![Copr build status](https://copr.fedorainfracloud.org/coprs/hamishw96/linux-id/package/linux-id/status_image/last_build.png)](https://copr.fedorainfracloud.org/coprs/hamishw96/linux-id/package/linux-id/)
+
 On Fedora systems, you can use COPR to install linux-id:
 ``` bash
 sudo dnf copr enable hamishw96/linux-id
