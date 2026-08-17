@@ -1859,3 +1859,15 @@ func TestCredStoreIsIsolatedToTempDir(t *testing.T) {
 		t.Fatalf("expected 1 cred, got %d (err=%v)", len(got), err)
 	}
 }
+
+func TestForcedUVVerifier_ReportsUV(t *testing.T) {
+	base := &pinentryVerifier{} // PerformsUV() returns false natively
+	if base.PerformsUV() {
+		t.Fatal("expected base pinentryVerifier.PerformsUV() to be false")
+	}
+
+	wrapped := &forcedUVVerifier{UserVerifier: base}
+	if !wrapped.PerformsUV() {
+		t.Error("expected forcedUVVerifier.PerformsUV() to return true")
+	}
+}

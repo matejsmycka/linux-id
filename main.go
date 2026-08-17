@@ -33,6 +33,7 @@ import (
 var backend = flag.String("backend", "tpm", "tpm|memory")
 var device = flag.String("device", "/dev/tpmrm0", "TPM device path")
 var auth = flag.String("auth", "pinentry", "pinentry|fprintd — pinentry confirms presence (UP only); fprintd verifies identity via fingerprint (UP+UV)")
+var forceUV = flag.Bool("force-uv", false, "force PerformsUV() to return true regardless of verifier")
 
 // ctap2Enc is the CTAP2 Canonical CBOR encoder. Per CTAP §6, all CTAP2
 // messages must use canonical encoding (sorted keys, shortest-form integers,
@@ -168,6 +169,9 @@ func (v *cachingVerifier) VerifyUser(prompt string) (<-chan VerifyResult, error)
 
 func (v *cachingVerifier) PerformsUV() bool { return v.inner.PerformsUV() }
 
+type forcedUVVerifier struct{ UserVerifier }
+func (f *forcedUVVerifier) PerformsUV() bool { return true }
+
 const (
 	deviceOpenAttempts = 10
 	deviceOpenDelay    = 200 * time.Millisecond
@@ -230,6 +234,10 @@ func newServer() *server {
 		inner = &pinentryVerifier{pe: pe}
 	}
 	s.verifier = newCachingVerifier(inner)
+
+	if *forceUV {
+		s.verifier = &forcedUVVerifier{UserVerifier: s.verifier}
+	}
 
 	if *backend == "tpm" {
 		signer, err := openWithRetry("tpm", func() (*tpm.TPM, error) {
@@ -843,5 +851,3 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 	log.Printf("GetAssertion ok: rp=%s", req.RPID)
 	token.WriteCtap2Response(ctx, evt, ctap2.StatusOK, encoded)
 }
-
-
