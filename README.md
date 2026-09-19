@@ -29,6 +29,30 @@ yay -Syy linux-id
 
 [https://aur.archlinux.org/packages/linux-id](https://aur.archlinux.org/packages/linux-id)
 
+#### Fedora
+
+[![Copr build status](https://copr.fedorainfracloud.org/coprs/hamishw96/linux-id/package/linux-id/status_image/last_build.png)](https://copr.fedorainfracloud.org/coprs/hamishw96/linux-id/package/linux-id/)
+
+On Fedora systems, you can use COPR to install linux-id:
+``` bash
+sudo dnf copr enable hamishw96/linux-id
+sudo dnf install linux-id
+```
+By default, linux-id uses pinentry for presence confirmation. To use fingerprint
+authentication via fprintd instead:
+
+1. Ensure a fingerprint is enrolled: `fprintd-enroll`
+2. Override the systemd service command: `systemctl --user edit linux-id.service`
+3. Add the following lines:
+```
+[Service]
+ExecStart=
+ExecStart=/usr/bin/linux-id --auth fprintd
+```
+4. Restart the service: `systemctl --user restart linux-id.service`
+
+https://copr.fedorainfracloud.org/coprs/hamishw96/linux-id/
+
 
 ## Test
 
