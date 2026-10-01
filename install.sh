@@ -6,17 +6,19 @@ executable=linux-id
 release_url="https://github.com/matejsmycka/linux-id/releases/latest/download/linux-id_Linux_x86_64.tar.gz"
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 
-auth_mode="pinentry"
+auth_mode="system"
 
 function usage() {
     cat <<EOF
-Usage: $0 [--auth pinentry|fprintd] [-h|--help]
+Usage: $0 [--auth system|fprintd|confirm] [-h|--help]
 
 Options:
-  --auth pinentry   Confirm presence with a click dialog (default).
+  --auth system     Verify through the OS authentication agent (default).
   --auth fprintd    Confirm presence with a fingerprint scan.
                     Requires fprintd installed and a fingerprint enrolled
                     via 'fprintd-enroll'. Sets the WebAuthn UV flag.
+  --auth confirm    Confirm presence with a click dialog. Security keys only;
+                    does not satisfy passkey user-verification requirements.
   -h, --help        Show this help.
 EOF
 }
@@ -44,15 +46,16 @@ while [ $# -gt 0 ]; do
 done
 
 case "$auth_mode" in
-    pinentry|fprintd) ;;
+    pinentry) auth_mode="system" ;; # compatibility with older invocations
+    system|fprintd|confirm) ;;
     *)
-        echo "Invalid --auth value: $auth_mode (must be 'pinentry' or 'fprintd')" >&2
+        echo "Invalid --auth value: $auth_mode" >&2
         exit 1
         ;;
 esac
 
-if [ "$auth_mode" = "fprintd" ]; then
-    auth_arg=" --auth fprintd"
+if [ "$auth_mode" != "system" ]; then
+    auth_arg=" --auth $auth_mode"
 else
     auth_arg=""
 fi
@@ -175,7 +178,27 @@ function make_executable() {
 }
 
 function install_unit_and_rules() {
-    sudo install -Dm644 /dev/stdin /usr/lib/systemd/user/linux-id.service <<EOF
+	# PolicyKit performs OS-owned user verification for passkey operations.
+	sudo install -Dm644 /dev/stdin /usr/share/polkit-1/actions/io.github.matejsmycka.linux-id.policy <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+  "https://specifications.freedesktop.org/PolicyKit/1.0/policyconfig.dtd">
+<policyconfig>
+  <vendor>linux-id</vendor>
+  <action id="io.github.matejsmycka.linux-id.authenticate">
+    <description>Verify a Linux-ID passkey operation</description>
+    <message>Authentication is required to use your Linux-ID passkey</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>auth_self</allow_inactive>
+      <allow_active>auth_self</allow_active>
+    </defaults>
+  </action>
+</policyconfig>
+EOF
+	handle "Failed to install PolicyKit action"
+
+	sudo install -Dm644 /dev/stdin /usr/lib/systemd/user/linux-id.service <<EOF
 [Unit]
 Description=linux-id TPM service
 Documentation=https://github.com/matejsmycka/linux-id
@@ -186,7 +209,13 @@ ConditionKernelModuleLoaded=uhid
 Type=simple
 ExecStart=/usr/bin/linux-id${auth_arg}
 
+# PolicyKit identifies the requesting subject by its host PID, process start
+# time, and UID. Keep linux-id in the host PID and user namespaces so it can
+# authenticate directly without spawning a transient helper service.
+# ProtectProc=noaccess still permits the daemon to read its own /proc entry.
 ProtectProc=noaccess
+PrivatePIDs=false
+PrivateUsers=false
 # pinentry may need to access /run/user/\$UID/wayland-0
 BindReadOnlyPaths=%t
 # pinentry may need to access /tmp/.X11-unix
@@ -198,8 +227,6 @@ ProtectSystem=strict
 ProtectHome=tmpfs
 PrivateTmp=true
 PrivateNetwork=true
-PrivatePIDs=true
-PrivateUsers=true
 ProtectHostname=true
 ProtectClock=true
 ProtectKernelTunables=true

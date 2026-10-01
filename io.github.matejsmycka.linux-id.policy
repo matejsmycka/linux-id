@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+  "https://specifications.freedesktop.org/PolicyKit/1.0/policyconfig.dtd">
+<policyconfig>
+  <vendor>linux-id</vendor>
+  <action id="io.github.matejsmycka.linux-id.authenticate">
+    <description>Verify a Linux-ID passkey operation</description>
+    <message>Authentication is required to use your Linux-ID passkey</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>auth_self</allow_inactive>
+      <allow_active>auth_self</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

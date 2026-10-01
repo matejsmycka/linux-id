@@ -35,6 +35,7 @@ type MakeCredentialRequest struct {
 	User             UserEntity       `cbor:"3,keyasint"`
 	PubKeyCredParams []CredParam      `cbor:"4,keyasint"`
 	ExcludeList      []CredDescriptor `cbor:"5,keyasint,omitempty"`
+	Extensions       map[string]any   `cbor:"6,keyasint,omitempty"`
 	Options          *MakeCredOptions `cbor:"7,keyasint,omitempty"`
 }
 
@@ -43,6 +44,7 @@ type GetAssertionRequest struct {
 	RPID           string            `cbor:"1,keyasint"`
 	ClientDataHash []byte            `cbor:"2,keyasint"`
 	AllowList      []CredDescriptor  `cbor:"3,keyasint,omitempty"`
+	Extensions     map[string]any    `cbor:"4,keyasint,omitempty"`
 	Options        *GetAssertOptions `cbor:"5,keyasint,omitempty"`
 }
 
@@ -73,5 +75,6 @@ type MakeCredOptions struct {
 }
 
 type GetAssertOptions struct {
-	UV bool `cbor:"uv,omitempty"`
+	UP *bool `cbor:"up,omitempty"`
+	UV bool  `cbor:"uv,omitempty"`
 }

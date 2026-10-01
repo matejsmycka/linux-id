@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"sync"
+	"time"
 
 	"github.com/matejsmycka/linux-id/fidoauth"
 	"github.com/psanford/uhid"
@@ -32,15 +34,24 @@ func New(ctx context.Context, name string) (*SoftToken, error) {
 		device:    d,
 		evtChan:   evtChan,
 		authEvent: make(chan AuthEvent),
+		pending:   make(map[uint32]chan struct{}),
 	}
 
 	return &t, nil
 }
 
 type SoftToken struct {
-	device    *uhid.Device
+	device    eventWriter
 	evtChan   chan uhid.Event
 	authEvent chan AuthEvent
+
+	writeMu   sync.Mutex
+	pendingMu sync.Mutex
+	pending   map[uint32]chan struct{}
+}
+
+type eventWriter interface {
+	WriteEvent(interface{}) error
 }
 
 type AuthEvent struct {
@@ -111,13 +122,16 @@ func (t *SoftToken) Run(ctx context.Context) {
 
 			resp := newInitResponse(chanID, nonce)
 
-			err := writeRespose(t.device, reqChanID, CmdInit, resp.Marshal(), 0)
+			err := t.writeResponse(reqChanID, CmdInit, resp.Marshal(), 0)
 			if err != nil {
 				log.Printf("Write Init resp err: %s", err)
 				continue
 			}
 		case CmdMsg:
 			req, err := fidoauth.DecodeAuthenticatorRequest(innerMsg)
+			if err == nil {
+				t.startKeepalive(reqChanID)
+			}
 
 			evt := AuthEvent{
 				chanID: reqChanID,
@@ -129,6 +143,7 @@ func (t *SoftToken) Run(ctx context.Context) {
 			select {
 			case t.authEvent <- evt:
 			case <-ctx.Done():
+				t.stopKeepalive(reqChanID)
 				return
 			}
 		case CmdCbor:
@@ -136,15 +151,25 @@ func (t *SoftToken) Run(ctx context.Context) {
 			if cbor == nil {
 				cbor = []byte{}
 			}
+			t.startKeepalive(reqChanID)
 			evt := AuthEvent{chanID: reqChanID, cmd: cmd, RawCbor: cbor}
 			select {
 			case t.authEvent <- evt:
 			case <-ctx.Done():
+				t.stopKeepalive(reqChanID)
 				return
 			}
+		case CmdCancel:
+			// CTAPHID_CANCEL never receives a response of its own. Stop the
+			// keepalive stream; the in-flight operation will finish or time out.
+			t.stopKeepalive(reqChanID)
+		case CmdPing:
+			if err := t.writeResponse(reqChanID, CmdPing, innerMsg, 0); err != nil {
+				log.Printf("write ping response err: %s", err)
+			}
 		default:
-			log.Printf("unsuppoted cmd: %s %d", cmd, cmd)
-			writeRespose(t.device, reqChanID, cmd, nil, swInsNotSupported)
+			log.Printf("unsupported cmd: %s %d", cmd, cmd)
+			t.writeResponse(reqChanID, cmd, nil, swInsNotSupported)
 		}
 	}
 }
@@ -158,14 +183,16 @@ const (
 	frameTypeInit = 0x80
 	frameTypeCont = 0x00
 
-	CmdPing  CmdType = 0x01 // Echo data through local processor only
-	CmdMsg   CmdType = 0x03 // Send U2F message frame
-	CmdLock  CmdType = 0x04 // Send lock channel command
-	CmdInit  CmdType = 0x06 // Channel initialization
-	CmdWink  CmdType = 0x08 // Send device identification wink
-	CmdCbor  CmdType = 0x10 // Send encapsulated CTAP CBOR
-	CmdSync  CmdType = 0x3c // Protocol resync command
-	CmdError CmdType = 0x3f // Error response
+	CmdPing      CmdType = 0x01 // Echo data through local processor only
+	CmdMsg       CmdType = 0x03 // Send U2F message frame
+	CmdLock      CmdType = 0x04 // Send lock channel command
+	CmdInit      CmdType = 0x06 // Channel initialization
+	CmdWink      CmdType = 0x08 // Send device identification wink
+	CmdCbor      CmdType = 0x10 // Send encapsulated CTAP CBOR
+	CmdCancel    CmdType = 0x11 // Cancel an outstanding request on this channel
+	CmdKeepalive CmdType = 0x3b // Authenticator is still processing a request
+	CmdSync      CmdType = 0x3c // Protocol resync command
+	CmdError     CmdType = 0x3f // Error response
 
 	vendorSpecificFirstCmd = 0x40
 	vendorSpecificLastCmd  = 0x7f
@@ -210,6 +237,10 @@ func (c CmdType) String() string {
 		return "CmdError"
 	case CmdCbor:
 		return "CmdCbor"
+	case CmdCancel:
+		return "CmdCancel"
+	case CmdKeepalive:
+		return "CmdKeepalive"
 	}
 
 	if c >= vendorSpecificFirstCmd && c <= vendorSpecificLastCmd {
@@ -451,17 +482,71 @@ func (resp *initResponse) Marshal() []byte {
 }
 
 func (t *SoftToken) WriteResponse(ctx context.Context, evt AuthEvent, data []byte, status uint16) error {
-	return writeRespose(t.device, evt.chanID, evt.cmd, data, status)
+	t.stopKeepalive(evt.chanID)
+	return t.writeResponse(evt.chanID, evt.cmd, data, status)
 }
 
 // WriteCtap2Response sends a CTAP2 response: [1-byte status] + [CBOR payload].
 // No trailing U2F status word is appended.
 func (t *SoftToken) WriteCtap2Response(ctx context.Context, evt AuthEvent, status byte, data []byte) error {
+	t.stopKeepalive(evt.chanID)
 	payload := append([]byte{status}, data...)
-	return writeRespose(t.device, evt.chanID, CmdCbor, payload, 0)
+	return t.writeResponse(evt.chanID, CmdCbor, payload, 0)
 }
 
-func writeRespose(d *uhid.Device, chanID uint32, cmd CmdType, data []byte, status uint16) error {
+func (t *SoftToken) writeResponse(chanID uint32, cmd CmdType, data []byte, status uint16) error {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+	return writeResponse(t.device, chanID, cmd, data, status)
+}
+
+const keepaliveInterval = 100 * time.Millisecond
+
+func (t *SoftToken) startKeepalive(chanID uint32) {
+	t.pendingMu.Lock()
+	if previous := t.pending[chanID]; previous != nil {
+		close(previous)
+	}
+	done := make(chan struct{})
+	t.pending[chanID] = done
+	t.pendingMu.Unlock()
+
+	go func() {
+		ticker := time.NewTicker(keepaliveInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				// STATUS_UPNEEDED: the operation is waiting for the user to
+				// approve it in pinentry or via the configured verifier.
+				t.pendingMu.Lock()
+				if t.pending[chanID] != done {
+					t.pendingMu.Unlock()
+					return
+				}
+				err := t.writeResponse(chanID, CmdKeepalive, []byte{0x02}, 0)
+				t.pendingMu.Unlock()
+				if err != nil {
+					log.Printf("write keepalive err: %s", err)
+					return
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+}
+
+func (t *SoftToken) stopKeepalive(chanID uint32) {
+	t.pendingMu.Lock()
+	if done := t.pending[chanID]; done != nil {
+		delete(t.pending, chanID)
+		close(done)
+	}
+	t.pendingMu.Unlock()
+}
+
+func writeResponse(d eventWriter, chanID uint32, cmd CmdType, data []byte, status uint16) error {
 
 	initial := true
 	pktSize := initialPacketDataLen
@@ -474,7 +559,7 @@ func writeRespose(d *uhid.Device, chanID uint32, cmd CmdType, data []byte, statu
 
 	totalSize := uint16(len(data))
 	var seqNo uint8
-	for len(data) > 0 {
+	for initial || len(data) > 0 {
 		sliceSize := pktSize
 		if len(data) < sliceSize {
 			sliceSize = len(data)

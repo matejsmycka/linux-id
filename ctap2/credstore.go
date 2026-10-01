@@ -62,14 +62,18 @@ func (cs *CredStore) store(creds []StoredCredential) error {
 	return os.Rename(tmp, cs.path)
 }
 
-// Save appends c to the store, replacing any existing entry with the same CredID.
+// Save appends c to the store. A new resident credential for the same RP and
+// user replaces the older one: after an RP-side deletion and re-registration,
+// returning the orphaned credential first would make discoverable login fail.
 func (cs *CredStore) Save(c StoredCredential) error {
 	creds, err := cs.load()
 	if err != nil {
 		return err
 	}
 	for i, existing := range creds {
-		if bytes.Equal(existing.CredID, c.CredID) {
+		sameCredential := bytes.Equal(existing.CredID, c.CredID)
+		sameAccount := bytes.Equal(existing.RPIDHash, c.RPIDHash) && bytes.Equal(existing.UserID, c.UserID)
+		if sameCredential || sameAccount {
 			creds[i] = c
 			return cs.store(creds)
 		}

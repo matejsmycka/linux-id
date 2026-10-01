@@ -12,7 +12,10 @@ chmod +x install.sh
 ./install.sh
 ```
 
-To use fingerprint authentication, install with `--auth fprintd`.
+By default, linux-id verifies passkey operations through PolicyKit's native
+system-authentication dialog.
+
+To use fingerprint authentication instead, install with `--auth fprintd`.
 
 ```bash
 ./install.sh --auth fprintd
@@ -38,7 +41,7 @@ On Fedora systems, you can use COPR to install linux-id:
 sudo dnf copr enable hamishw96/linux-id
 sudo dnf install linux-id
 ```
-By default, linux-id uses pinentry for presence confirmation. To use fingerprint
+By default, linux-id uses PolicyKit for system-owned user verification. To use fingerprint
 authentication via fprintd instead:
 
 1. Ensure a fingerprint is enrolled: `fprintd-enroll`
@@ -75,7 +78,11 @@ However, after a discussion with the author, I have decided to create a new repo
 
 linux-id supports CTAP2 in addition to CTAP1/U2F, enabling passkey registration and authentication.
 
-Use `--auth fprintd` for fingerprint authentication (sets UV flag, required by some sites); the default `pinentry` mode shows a click dialog but does not set UV.
+The default `system` mode delegates verification to PolicyKit's native system
+authentication agent and sets the UV flag required by passkey sites. `--auth
+fprintd` verifies with a fingerprint. Use `--auth confirm` only for
+presence-only security-key use; it does not satisfy sites that require user
+verification for passkeys.
 
 To use fingerprint authentication, run:
 
@@ -87,7 +94,7 @@ To use fingerprint authentication, run:
 
 ### Resident credentials
 
-When a site requests `rk=true` (resident key), linux-id stores the credential locally at `~/.config/linux-id/creds.json`.
+When a site requests a discoverable credential (`rk=true`), linux-id stores its public metadata at `~/.config/linux-id/creds.json`.
 
 ## Future work
 

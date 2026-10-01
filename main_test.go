@@ -108,16 +108,21 @@ func (v *fakeVerifier) PerformsUV() bool { return v.performsUV }
 // constructs an ecdsa.PrivateKey without setting X/Y on the public key — newer
 // Go (>=1.20) rejects that during ecdsa.SignASN1.
 type fakeSigner struct {
-	mu       sync.Mutex
-	keys     map[string]*ecdsa.PrivateKey // credID-as-string → key
-	counter  uint32
+	mu      sync.Mutex
+	keys    map[string]fakeSigningKey // credID-as-string → key and application binding
+	counter uint32
+}
+
+type fakeSigningKey struct {
+	private          *ecdsa.PrivateKey
+	applicationParam []byte
 }
 
 func newFakeSigner() *fakeSigner {
-	return &fakeSigner{keys: make(map[string]*ecdsa.PrivateKey)}
+	return &fakeSigner{keys: make(map[string]fakeSigningKey)}
 }
 
-func (f *fakeSigner) RegisterKey(_ []byte) ([]byte, *big.Int, *big.Int, error) {
+func (f *fakeSigner) RegisterKey(applicationParam []byte) ([]byte, *big.Int, *big.Int, error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, nil, err
@@ -127,19 +132,22 @@ func (f *fakeSigner) RegisterKey(_ []byte) ([]byte, *big.Int, *big.Int, error) {
 		return nil, nil, nil, err
 	}
 	f.mu.Lock()
-	f.keys[string(credID)] = priv
+	f.keys[string(credID)] = fakeSigningKey{private: priv, applicationParam: append([]byte(nil), applicationParam...)}
 	f.mu.Unlock()
 	return credID, priv.PublicKey.X, priv.PublicKey.Y, nil
 }
 
-func (f *fakeSigner) SignASN1(keyHandle, _ []byte, digest []byte) ([]byte, error) {
+func (f *fakeSigner) SignASN1(keyHandle, applicationParam, digest []byte) ([]byte, error) {
 	f.mu.Lock()
-	priv, ok := f.keys[string(keyHandle)]
+	key, ok := f.keys[string(keyHandle)]
 	f.mu.Unlock()
 	if !ok {
 		return nil, errors.New("unknown key handle")
 	}
-	return ecdsa.SignASN1(rand.Reader, priv, digest)
+	if !bytes.Equal(key.applicationParam, applicationParam) {
+		return nil, errors.New("application parameter mismatch")
+	}
+	return ecdsa.SignASN1(rand.Reader, key.private, digest)
 }
 
 func (f *fakeSigner) Counter() uint32 {
@@ -248,6 +256,7 @@ func newTestServer(t *testing.T, verifier UserVerifier, pe pinentryClient) *serv
 	t.Setenv("HOME", t.TempDir())
 	return &server{
 		pe:       pe,
+		selector: verifier,
 		verifier: verifier,
 		signer:   newFakeSigner(),
 		cs:       ctap2.NewCredStore(),
@@ -311,7 +320,9 @@ func registerCred(t *testing.T, s *server, rpID, rpName, userName string, rk boo
 	if !ok {
 		t.Fatalf("registerCred requires a *fakeVerifier")
 	}
-	verifier.nextResult = VerifyResult{OK: true}
+	verifier.nextResult.OK = true
+	verifier.nextResult.Reason = ReasonUnspecified
+	verifier.nextResult.Error = nil
 	payload := makeMakeCredCBOR(t, rpID, rpName, userName, rk, false)
 	s.handleMakeCredential(context.Background(), resp, fidohid.AuthEvent{}, payload)
 	if len(resp.ctap2) != 1 {
@@ -394,10 +405,9 @@ func debugStack() string {
 	return string(buf[:n])
 }
 
-// CTAP2 §6.2: User Presence MUST be obtained for every GetAssertion. The
-// verifier (or pinentry presence dialog) must always be invoked, regardless
-// of whether the RP requested user verification.
-func TestGetAssertion_AlwaysCallsVerifier(t *testing.T) {
+// Normal GetAssertion requests require user presence, whether or not the
+// client explicitly requests user verification.
+func TestGetAssertion_NormalRequestsCallVerifier(t *testing.T) {
 	cases := []struct {
 		name    string
 		options *ctap2.GetAssertOptions
@@ -432,6 +442,83 @@ func TestGetAssertion_AlwaysCallsVerifier(t *testing.T) {
 	}
 }
 
+// CTAP preflight requests explicitly set up=false and uv=false to silently
+// test whether an allowList credential belongs to this authenticator. They
+// must not prompt, and their authenticatorData must have both UP and UV clear.
+func TestGetAssertion_PreflightSkipsVerifierAndClearsFlags(t *testing.T) {
+	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
+	s := newTestServer(t, verifier, &fakePinentry{})
+	credID := registerCred(t, s, "discord.com", "Discord", "alice", false)
+	verifier.callCount = 0
+
+	up := false
+	resp := &fakeResponder{}
+	payload := makeAssertionCBOR(t, "discord.com",
+		[]ctap2.CredDescriptor{{Type: "public-key", ID: credID}},
+		&ctap2.GetAssertOptions{UP: &up, UV: false})
+	s.handleGetAssertion(context.Background(), resp, fidohid.AuthEvent{}, payload)
+
+	if got := resp.lastCtap2().status; got != ctap2.StatusOK {
+		t.Fatalf("expected StatusOK, got 0x%02x", got)
+	}
+	if verifier.callCount != 0 {
+		t.Fatalf("preflight invoked verifier %d times, want 0", verifier.callCount)
+	}
+	top := decodeAssertion(t, resp.lastCtap2().data)
+	var authData []byte
+	if err := cbor.Unmarshal(top[2], &authData); err != nil {
+		t.Fatalf("decode authData: %s", err)
+	}
+	if len(authData) < 33 {
+		t.Fatalf("authData too short: %d", len(authData))
+	}
+	if flags := authData[32]; flags != 0 {
+		t.Fatalf("preflight flags = 0x%02x, want 0", flags)
+	}
+}
+
+func TestMakeCredential_RKFalseRemainsDiscoverableForPlatformLogin(t *testing.T) {
+	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
+	s := newTestServer(t, verifier, &fakePinentry{})
+	registerCred(t, s, "discord.com", "Discord", "alice", false)
+	verifier.callCount = 0
+
+	resp := &fakeResponder{}
+	payload := makeAssertionCBOR(t, "discord.com", nil,
+		&ctap2.GetAssertOptions{UV: true})
+	s.handleGetAssertion(context.Background(), resp, fidohid.AuthEvent{}, payload)
+
+	if got := resp.lastCtap2().status; got != ctap2.StatusOK {
+		t.Fatalf("passwordless assertion status = 0x%02x, want StatusOK", got)
+	}
+	if verifier.callCount != 1 {
+		t.Fatalf("verification calls = %d, want 1", verifier.callCount)
+	}
+	top := decodeAssertion(t, resp.lastCtap2().data)
+	if _, ok := top[4]; !ok {
+		t.Error("discoverable assertion is missing its user entity")
+	}
+}
+
+func TestMakeCredential_RKFalseRemainsNonDiscoverableForOtherRPs(t *testing.T) {
+	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
+	s := newTestServer(t, verifier, &fakePinentry{})
+	registerCred(t, s, "example.com", "Example", "alice", false)
+	verifier.callCount = 0
+
+	resp := &fakeResponder{}
+	payload := makeAssertionCBOR(t, "example.com", nil,
+		&ctap2.GetAssertOptions{UV: true})
+	s.handleGetAssertion(context.Background(), resp, fidohid.AuthEvent{}, payload)
+
+	if got := resp.lastCtap2().status; got != ctap2.StatusNoCredentials {
+		t.Fatalf("non-discoverable assertion status = 0x%02x, want StatusNoCredentials", got)
+	}
+	if verifier.callCount != 0 {
+		t.Fatalf("missing credential invoked verifier %d times, want 0", verifier.callCount)
+	}
+}
+
 func TestCachingVerifier_CachesRecentSuccess(t *testing.T) {
 	inner := &fakeVerifier{nextResult: VerifyResult{OK: true}}
 	v := newCachingVerifier(inner)
@@ -447,7 +534,7 @@ func TestCachingVerifier_CachesRecentSuccess(t *testing.T) {
 		t.Fatalf("after first call, inner.callCount = %d, want 1", inner.callCount)
 	}
 
-	ch2, err := v.VerifyUser("second")
+	ch2, err := v.VerifyUser("first")
 	if err != nil {
 		t.Fatalf("second VerifyUser: %s", err)
 	}
@@ -457,6 +544,103 @@ func TestCachingVerifier_CachesRecentSuccess(t *testing.T) {
 	if inner.callCount != 1 {
 		t.Errorf("cached call still invoked inner; callCount = %d, want 1", inner.callCount)
 	}
+}
+
+func TestCachingVerifier_DoesNotCrossPromptBoundary(t *testing.T) {
+	inner := &fakeVerifier{nextResult: VerifyResult{OK: true}}
+	v := newCachingVerifier(inner)
+
+	first, err := v.VerifyUser("Select linux-id for this passkey request")
+	if err != nil {
+		t.Fatalf("selection VerifyUser: %s", err)
+	}
+	<-first
+
+	second, err := v.VerifyUser("FIDO2 Register: example.com")
+	if err != nil {
+		t.Fatalf("registration VerifyUser: %s", err)
+	}
+	<-second
+
+	if inner.callCount != 2 {
+		t.Fatalf("approval leaked across prompts; callCount = %d, want 2", inner.callCount)
+	}
+}
+
+func TestCachingVerifier_ReusesUVAcrossRelatedPrompts(t *testing.T) {
+	inner := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
+	v := newCachingVerifier(inner)
+
+	first, _ := v.VerifyUser("FIDO2 Authenticate: legacy-facet")
+	<-first
+	second, _ := v.VerifyUser("FIDO2 Authenticate: github.com")
+	<-second
+	third, _ := v.VerifyUser("FIDO2 Register: github.com")
+	<-third
+
+	if inner.callCount != 1 {
+		t.Fatalf("related UV prompts invoked verifier %d times, want 1", inner.callCount)
+	}
+}
+
+func TestSystemAuthVerifierUsesSystemAuthentication(t *testing.T) {
+	called := false
+	verifier := &systemAuthVerifier{
+		authenticate: func() error {
+			called = true
+			return nil
+		},
+	}
+
+	ch, err := verifier.VerifyUser("FIDO2 Register: github.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := <-ch; !result.OK {
+		t.Fatalf("verification result = %+v", result)
+	}
+	if !called {
+		t.Fatal("system authentication was not called")
+	}
+	if !verifier.PerformsUV() {
+		t.Fatal("system authentication verifier must provide UV")
+	}
+}
+
+func TestMakeCredential_ChromiumSelectionProbeIsNotRegistered(t *testing.T) {
+	verifier := &fakeVerifier{nextResult: VerifyResult{OK: true}}
+	s := newTestServer(t, verifier, &fakePinentry{})
+	signer := s.signer.(*fakeSigner)
+
+	resp := &fakeResponder{}
+	probe := ctap2.MakeCredentialRequest{
+		ClientDataHash:   make([]byte, 32),
+		RP:               ctap2.RPEntity{ID: ".dummy"},
+		User:             ctap2.UserEntity{ID: []byte{1}, Name: "dummy"},
+		PubKeyCredParams: []ctap2.CredParam{{Type: "public-key", Alg: -7}},
+	}
+	payload, err := cbor.Marshal(probe)
+	if err != nil {
+		t.Fatalf("marshal Chromium selection probe: %s", err)
+	}
+	s.handleMakeCredential(context.Background(), resp, fidohid.AuthEvent{}, payload)
+
+	if got := resp.lastCtap2().status; got != ctap2.StatusOK {
+		t.Fatalf("selection response status = 0x%02x, want OK", got)
+	}
+	if verifier.callCount != 1 || len(verifier.prompts) != 1 || verifier.prompts[0] != "Select linux-id for this passkey request" {
+		t.Fatalf("unexpected selection prompt: calls=%d prompts=%v", verifier.callCount, verifier.prompts)
+	}
+	signer.mu.Lock()
+	registeredKeys := len(signer.keys)
+	signer.mu.Unlock()
+	if registeredKeys != 0 {
+		t.Fatalf("selection probe created %d signer keys, want 0", registeredKeys)
+	}
+
+	// The synthetic success still has to be parseable as MakeCredential data,
+	// otherwise Chromium will reject it before observing the completed touch.
+	extractCredID(t, resp.lastCtap2().data)
 }
 
 func TestCachingVerifier_DoesNotCacheFailure(t *testing.T) {
@@ -582,7 +766,7 @@ func TestMakeCredential_VerifierRejection(t *testing.T) {
 }
 
 // AuthFlagUV must only be set when the verifier actually identifies the user
-// (e.g. fingerprint), never for a UP-only confirmation. AuthFlagUP is always set.
+// (e.g. fingerprint), never for a UP-only confirmation. Normal assertions set UP.
 func TestGetAssertion_AuthFlagsHonest(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -1020,6 +1204,16 @@ func TestGetInfo_ResponseShape(t *testing.T) {
 	if !hasFIDO2 || !hasU2F {
 		t.Errorf("versions = %v, want both FIDO_2_0 and U2F_V2", versions)
 	}
+	var opts map[string]bool
+	if err := cbor.Unmarshal(top[4], &opts); err != nil {
+		t.Fatalf("decode GetInfo options: %s", err)
+	}
+	if !opts["plat"] {
+		t.Error("plat option must be true for the machine-bound authenticator")
+	}
+	if !opts["rk"] {
+		t.Error("rk option must advertise discoverable-credential support")
+	}
 }
 
 // readSignedMapKeyOrder is like readMapIntKeyOrder but accepts CBOR negative
@@ -1415,10 +1609,8 @@ func TestGetAssertion_AllowListSecondCredValid(t *testing.T) {
 	}
 }
 
-// AllowList where every entry is invalid: handler must return NoCredentials
-// and never invoke the verifier (no point asking for biometric if there's no
-// key to sign with).
-func TestGetAssertion_AllowListAllInvalidNoVerifierCall(t *testing.T) {
+// Invalid key handles are rejected before asking the user to authenticate.
+func TestGetAssertion_AllowListAllInvalidSkipsVerification(t *testing.T) {
 	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
 	s := newTestServer(t, verifier, &fakePinentry{})
 
@@ -1436,7 +1628,29 @@ func TestGetAssertion_AllowListAllInvalidNoVerifierCall(t *testing.T) {
 		t.Fatalf("expected StatusNoCredentials, got 0x%02x", got)
 	}
 	if verifier.callCount != 0 {
-		t.Errorf("verifier must not be called if no credential matches; got %d calls", verifier.callCount)
+		t.Errorf("verifier call count = %d, want 0", verifier.callCount)
+	}
+}
+
+func TestGetAssertion_SkipsUnusableResidentCredential(t *testing.T) {
+	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
+	s := newTestServer(t, verifier, &fakePinentry{})
+	rpHash := sha256.Sum256([]byte("github.com"))
+	if err := s.cs.Save(ctap2.StoredCredential{
+		CredID:   []byte("stale-resident-credential"),
+		RPIDHash: rpHash[:],
+		RPID:     "github.com",
+		UserName: "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := &fakeResponder{}
+	payload := makeAssertionCBOR(t, "github.com", nil, nil)
+	s.handleGetAssertion(context.Background(), resp, fidohid.AuthEvent{}, payload)
+
+	if got := resp.lastCtap2().status; got != ctap2.StatusNoCredentials {
+		t.Fatalf("expected StatusNoCredentials for stale resident key, got 0x%02x", got)
 	}
 }
 
