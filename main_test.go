@@ -108,9 +108,9 @@ func (v *fakeVerifier) PerformsUV() bool { return v.performsUV }
 // constructs an ecdsa.PrivateKey without setting X/Y on the public key — newer
 // Go (>=1.20) rejects that during ecdsa.SignASN1.
 type fakeSigner struct {
-	mu       sync.Mutex
-	keys     map[string]*ecdsa.PrivateKey // credID-as-string → key
-	counter  uint32
+	mu      sync.Mutex
+	keys    map[string]*ecdsa.PrivateKey // credID-as-string → key
+	counter uint32
 }
 
 func newFakeSigner() *fakeSigner {
@@ -1491,11 +1491,12 @@ func TestGetAssertion_ResidentCredentialMinimalUserFields(t *testing.T) {
 
 // COSE EC2 public key shape: the inner crypto key inside MakeCredential's
 // authenticatorData must be a valid P-256 ES256 key. Field tags:
-//   1  (kty)  = 2  (EC2)
-//   3  (alg)  = -7 (ES256)
-//   -1 (crv)  = 1  (P-256)
-//   -2 (x)    = 32 bytes
-//   -3 (y)    = 32 bytes
+//
+//	1  (kty)  = 2  (EC2)
+//	3  (alg)  = -7 (ES256)
+//	-1 (crv)  = 1  (P-256)
+//	-2 (x)    = 32 bytes
+//	-3 (y)    = 32 bytes
 func TestMakeCredential_COSEKeyShape(t *testing.T) {
 	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
 	s := newTestServer(t, verifier, &fakePinentry{})
@@ -1857,5 +1858,149 @@ func TestCredStoreIsIsolatedToTempDir(t *testing.T) {
 	got, err := cs.FindByRPID([]byte("r"))
 	if err != nil || len(got) != 1 {
 		t.Fatalf("expected 1 cred, got %d (err=%v)", len(got), err)
+	}
+}
+
+// Firefox (authenticator-rs) filters multi-credential allowLists via silent
+// pre-flight authenticatorGetAssertion requests with options={"up": false}
+// before sending the interactive assertion with options={"up": true, "uv": true}.
+func TestRealWorld_FirefoxSilentPreFlightThenUVAssertion(t *testing.T) {
+	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
+	s := newTestServer(t, verifier, &fakePinentry{})
+
+	credID := registerCred(t, s, "google.com", "Google", "user@gmail.com", true)
+	verifier.callCount = 0
+
+	// 1. Silent pre-flight (up=false): must NOT invoke verifier, must clear UP/UV flags,
+	// and must omit user details (0x04) per CTAP 2.1 §6.2.2.
+	upFalse := false
+	preResp := &fakeResponder{}
+	prePayload := makeAssertionCBOR(t, "google.com",
+		[]ctap2.CredDescriptor{
+			{Type: "public-key", ID: []byte("other-device-cred")},
+			{Type: "public-key", ID: credID},
+		},
+		&ctap2.GetAssertOptions{UP: &upFalse})
+	s.handleGetAssertion(context.Background(), preResp, fidohid.AuthEvent{}, prePayload)
+
+	if got := preResp.lastCtap2().status; got != ctap2.StatusOK {
+		t.Fatalf("silent pre-flight: expected StatusOK, got 0x%02x", got)
+	}
+	if verifier.callCount != 0 {
+		t.Fatalf("silent pre-flight must not invoke verifier, got %d calls", verifier.callCount)
+	}
+	preTop := decodeAssertion(t, preResp.lastCtap2().data)
+	var preAuthData []byte
+	if err := cbor.Unmarshal(preTop[2], &preAuthData); err != nil {
+		t.Fatalf("decode pre-flight authData: %s", err)
+	}
+	if flags := preAuthData[32]; flags != 0 {
+		t.Errorf("pre-flight authData flags = 0x%02x, want 0x00", flags)
+	}
+	if _, hasUser := preTop[4]; hasUser {
+		t.Errorf("pre-flight response must not leak user entity (key 4) without UP/UV")
+	}
+
+	// 2. Interactive assertion (up=true, uv=true): invokes verifier once and sets UP|UV.
+	upTrue := true
+	authResp := &fakeResponder{}
+	authPayload := makeAssertionCBOR(t, "google.com",
+		[]ctap2.CredDescriptor{{Type: "public-key", ID: credID}},
+		&ctap2.GetAssertOptions{UP: &upTrue, UV: true})
+	s.handleGetAssertion(context.Background(), authResp, fidohid.AuthEvent{}, authPayload)
+
+	if got := authResp.lastCtap2().status; got != ctap2.StatusOK {
+		t.Fatalf("interactive assertion: expected StatusOK, got 0x%02x", got)
+	}
+	if verifier.callCount != 1 {
+		t.Errorf("expected 1 verifier call on interactive assertion, got %d", verifier.callCount)
+	}
+	authTop := decodeAssertion(t, authResp.lastCtap2().data)
+	var authData []byte
+	if err := cbor.Unmarshal(authTop[2], &authData); err != nil {
+		t.Fatalf("decode authData: %s", err)
+	}
+	wantFlags := ctap2.AuthFlagUP | ctap2.AuthFlagUV
+	if authData[32] != wantFlags {
+		t.Errorf("authData flags = 0x%02x, want 0x%02x", authData[32], wantFlags)
+	}
+}
+
+func TestGetAssertion_RejectUVTrueWithUPFalse(t *testing.T) {
+	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
+	s := newTestServer(t, verifier, &fakePinentry{})
+
+	upFalse := false
+	resp := &fakeResponder{}
+	payload := makeAssertionCBOR(t, "example.com", nil, &ctap2.GetAssertOptions{UP: &upFalse, UV: true})
+	s.handleGetAssertion(context.Background(), resp, fidohid.AuthEvent{}, payload)
+	if got := resp.lastCtap2().status; got != ctap2.StatusInvalidOption {
+		t.Fatalf("expected StatusInvalidOption (0x2C), got 0x%02x", got)
+	}
+	if verifier.callCount != 0 {
+		t.Errorf("verifier must not be called on invalid option combination")
+	}
+}
+
+// CTAP 2.1 §6.1.2 step 2: Firefox ("make.me.blink") and Chromium (".dummy") send
+// MakeCredential with zero-length pinUvAuthParam to trigger a user-presence touch
+// and expect CTAP2_ERR_PIN_NOT_SET (0x35) without minting a credential.
+func TestMakeCredential_ZeroLengthPinUvAuthParamBlinkProbe(t *testing.T) {
+	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
+	s := newTestServer(t, verifier, &fakePinentry{})
+
+	emptyPin := []byte{}
+	req := ctap2.MakeCredentialRequest{
+		ClientDataHash:   sha256.New().Sum([]byte("blink"))[:32],
+		RP:               ctap2.RPEntity{ID: "make.me.blink"},
+		User:             ctap2.UserEntity{ID: []byte{1}},
+		PubKeyCredParams: []ctap2.CredParam{{Type: "public-key", Alg: -7}},
+		Options:          &ctap2.MakeCredOptions{RK: true},
+		PinUvAuthParam:   &emptyPin,
+	}
+	payload, err := cbor.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := &fakeResponder{}
+	s.handleMakeCredential(context.Background(), resp, fidohid.AuthEvent{}, payload)
+
+	if got := resp.lastCtap2().status; got != ctap2.StatusPinNotSet {
+		t.Fatalf("expected StatusPinNotSet (0x35), got 0x%02x", got)
+	}
+	if verifier.callCount != 1 {
+		t.Errorf("expected 1 verifier call for UP on zero-length pinUvAuthParam, got %d", verifier.callCount)
+	}
+	hash := rpIDHash("make.me.blink")
+	creds, _ := s.cs.FindByRPID(hash[:])
+	if len(creds) != 0 {
+		t.Errorf("blink probe must not persist credentials, got %d", len(creds))
+	}
+}
+
+func TestMakeCredential_NonEmptyPinUvAuthParamRejectedWithoutUP(t *testing.T) {
+	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
+	s := newTestServer(t, verifier, &fakePinentry{})
+
+	nonEmptyPin := []byte{0xde, 0xad, 0xbe, 0xef}
+	req := ctap2.MakeCredentialRequest{
+		ClientDataHash:   sha256.New().Sum([]byte("pin"))[:32],
+		RP:               ctap2.RPEntity{ID: "example.com"},
+		User:             ctap2.UserEntity{ID: []byte{1}},
+		PubKeyCredParams: []ctap2.CredParam{{Type: "public-key", Alg: -7}},
+		PinUvAuthParam:   &nonEmptyPin,
+	}
+	payload, err := cbor.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := &fakeResponder{}
+	s.handleMakeCredential(context.Background(), resp, fidohid.AuthEvent{}, payload)
+
+	if got := resp.lastCtap2().status; got != ctap2.StatusPinNotSet {
+		t.Fatalf("expected StatusPinNotSet (0x35), got 0x%02x", got)
+	}
+	if verifier.callCount != 0 {
+		t.Errorf("expected 0 verifier calls on non-empty pinUvAuthParam, got %d", verifier.callCount)
 	}
 }

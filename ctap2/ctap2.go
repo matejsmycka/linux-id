@@ -9,16 +9,18 @@ const (
 
 // CTAP2 status codes (first byte of CmdCbor response).
 const (
-	StatusOK                  = byte(0x00)
-	StatusInvalidCbor         = byte(0x12)
-	StatusCredentialExcluded  = byte(0x19) // credential in excludeList already exists
-	StatusUnsupportedAlg      = byte(0x26)
-	StatusOperationDenied     = byte(0x27)
-	StatusInvalidOption       = byte(0x2C) // uv=true but authenticator cannot verify identity
-	StatusNoCredentials       = byte(0x2E)
-	StatusUserActionTimeout   = byte(0x2F) // CTAP 2.1 §8.2 / FIDO_ERR_USER_ACTION_TIMEOUT
-	StatusNotAllowed          = byte(0x30)
-	StatusUVInvalid           = byte(0x3F)
+	StatusOK                 = byte(0x00)
+	StatusInvalidCbor        = byte(0x12)
+	StatusCredentialExcluded = byte(0x19) // credential in excludeList already exists
+	StatusUnsupportedAlg     = byte(0x26)
+	StatusOperationDenied    = byte(0x27)
+	StatusInvalidOption      = byte(0x2C) // uv=true but authenticator cannot verify identity
+	StatusNoCredentials      = byte(0x2E)
+	StatusUserActionTimeout  = byte(0x2F) // CTAP 2.1 §8.2 / FIDO_ERR_USER_ACTION_TIMEOUT
+	StatusNotAllowed         = byte(0x30)
+	StatusPinInvalid         = byte(0x31)
+	StatusPinNotSet          = byte(0x35)
+	StatusUVInvalid          = byte(0x3F)
 )
 
 // authenticatorData flags (WebAuthn §6.1).
@@ -30,12 +32,14 @@ const (
 
 // MakeCredentialRequest is the CTAP2 0x01 authenticatorMakeCredential request.
 type MakeCredentialRequest struct {
-	ClientDataHash   []byte           `cbor:"1,keyasint"`
-	RP               RPEntity         `cbor:"2,keyasint"`
-	User             UserEntity       `cbor:"3,keyasint"`
-	PubKeyCredParams []CredParam      `cbor:"4,keyasint"`
-	ExcludeList      []CredDescriptor `cbor:"5,keyasint,omitempty"`
-	Options          *MakeCredOptions `cbor:"7,keyasint,omitempty"`
+	ClientDataHash    []byte           `cbor:"1,keyasint"`
+	RP                RPEntity         `cbor:"2,keyasint"`
+	User              UserEntity       `cbor:"3,keyasint"`
+	PubKeyCredParams  []CredParam      `cbor:"4,keyasint"`
+	ExcludeList       []CredDescriptor `cbor:"5,keyasint,omitempty"`
+	Options           *MakeCredOptions `cbor:"7,keyasint,omitempty"`
+	PinUvAuthParam    *[]byte          `cbor:"8,keyasint,omitempty"`
+	PinUvAuthProtocol *uint            `cbor:"9,keyasint,omitempty"`
 }
 
 // GetAssertionRequest is the CTAP2 0x02 authenticatorGetAssertion request.
@@ -73,5 +77,6 @@ type MakeCredOptions struct {
 }
 
 type GetAssertOptions struct {
-	UV bool `cbor:"uv,omitempty"`
+	UP *bool `cbor:"up,omitempty"`
+	UV bool  `cbor:"uv,omitempty"`
 }

@@ -577,6 +577,33 @@ func (s *server) handleMakeCredential(ctx context.Context, token tokenResponder,
 		return
 	}
 
+	// CTAP 2.1 §6.1.2 step 2 & 4: browsers (Firefox "make.me.blink", Chromium ".dummy")
+	// send a zero-length pinUvAuthParam to request user presence (blink) and expect
+	// CTAP2_ERR_PIN_NOT_SET (0x35) when clientPin is not configured.
+	if req.PinUvAuthParam != nil {
+		if len(*req.PinUvAuthParam) == 0 {
+			resultCh, err := s.verifier.VerifyUser("FIDO2 Presence: " + req.RP.ID)
+			if err != nil {
+				token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
+				return
+			}
+			childCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
+			defer cancel()
+			select {
+			case result := <-resultCh:
+				if !result.OK {
+					token.WriteCtap2Response(ctx, evt, statusForFailure(result), nil)
+					return
+				}
+			case <-childCtx.Done():
+				token.WriteCtap2Response(ctx, evt, ctap2.StatusUserActionTimeout, nil)
+				return
+			}
+		}
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusPinNotSet, nil)
+		return
+	}
+
 	// Verify at least one supported algorithm (ES256 = -7).
 	hasES256 := false
 	for _, p := range req.PubKeyCredParams {
@@ -716,8 +743,6 @@ func (s *server) handleMakeCredential(ctx context.Context, token tokenResponder,
 
 // handleGetAssertion implements CTAP2 authenticatorGetAssertion (passkey authentication).
 func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, evt fidohid.AuthEvent, payload []byte) {
-	log.Print("got Ctap2Cmd GetAssertion")
-
 	var req ctap2.GetAssertionRequest
 	if err := cbor.Unmarshal(payload, &req); err != nil {
 		log.Printf("GetAssertion decode err: %s", err)
@@ -725,14 +750,28 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 		return
 	}
 
+	requireUP := true
+	if req.Options != nil && req.Options.UP != nil {
+		requireUP = *req.Options.UP
+	}
+	reqUV := req.Options != nil && req.Options.UV
+	log.Printf("got Ctap2Cmd GetAssertion rp=%s allowList=%d up=%v uv=%v", req.RPID, len(req.AllowList), requireUP, reqUV)
+
 	if len(req.ClientDataHash) != 32 {
 		log.Printf("GetAssertion: invalid clientDataHash length %d", len(req.ClientDataHash))
 		token.WriteCtap2Response(ctx, evt, ctap2.StatusInvalidCbor, nil)
 		return
 	}
 
+	// Per CTAP 2.1 §6.2.2: uv=true with up=false is an invalid option combination.
+	if !requireUP && reqUV {
+		log.Print("GetAssertion: uv=true with up=false is invalid")
+		token.WriteCtap2Response(ctx, evt, ctap2.StatusInvalidOption, nil)
+		return
+	}
+
 	// If the RP requests uv=true but our verifier only provides user presence, reject.
-	if req.Options != nil && req.Options.UV && !s.verifier.PerformsUV() {
+	if reqUV && !s.verifier.PerformsUV() {
 		log.Print("GetAssertion: uv=true requested but verifier cannot verify identity")
 		token.WriteCtap2Response(ctx, evt, ctap2.StatusInvalidOption, nil)
 		return
@@ -743,63 +782,85 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 	// Resolve credential: allowList takes priority over resident credentials.
 	var keyHandle []byte
 	var storedCred *ctap2.StoredCredential
+	residentCreds, csErr := s.cs.FindByRPID(rpIdHash[:])
+
 	if len(req.AllowList) > 0 {
-		// Validate the key handle before prompting the user.
-		dummySig := sha256.Sum256([]byte("meticulously-Bacardi"))
+		// Check resident credential cache first to avoid an extra TPM round-trip on pre-flight.
 		for _, cred := range req.AllowList {
-			if _, err := s.signer.SignASN1(cred.ID, rpIdHash[:], dummySig[:]); err == nil {
-				keyHandle = cred.ID
+			for i := range residentCreds {
+				if bytes.Equal(residentCreds[i].CredID, cred.ID) {
+					keyHandle = cred.ID
+					storedCred = &residentCreds[i]
+					break
+				}
+			}
+			if keyHandle != nil {
 				break
 			}
 		}
 		if keyHandle == nil {
-			log.Printf("GetAssertion: no valid key handle in allowList for rp=%s", req.RPID)
+			// Fall back to validating non-resident key handles via TPM before prompting the user.
+			dummySig := sha256.Sum256([]byte("meticulously-Bacardi"))
+			for _, cred := range req.AllowList {
+				if _, err := s.signer.SignASN1(cred.ID, rpIdHash[:], dummySig[:]); err == nil {
+					keyHandle = cred.ID
+					break
+				}
+			}
+		}
+		if keyHandle == nil {
+			log.Printf("GetAssertion: no valid key handle in allowList (%d items) for rp=%s", len(req.AllowList), req.RPID)
 			token.WriteCtap2Response(ctx, evt, ctap2.StatusNoCredentials, nil)
 			return
 		}
 	} else {
-		creds, err := s.cs.FindByRPID(rpIdHash[:])
-		if err != nil {
-			log.Printf("GetAssertion credstore err: %s", err)
+		if csErr != nil {
+			log.Printf("GetAssertion credstore err: %s", csErr)
 			token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
 			return
 		}
-		if len(creds) == 0 {
+		if len(residentCreds) == 0 {
 			log.Printf("GetAssertion: no credentials for rp=%s", req.RPID)
 			token.WriteCtap2Response(ctx, evt, ctap2.StatusNoCredentials, nil)
 			return
 		}
-		storedCred = &creds[0]
+		// Pick the most recently saved credential (last entry) when multiple exist for the same RP.
+		storedCred = &residentCreds[len(residentCreds)-1]
 		keyHandle = storedCred.CredID
 	}
 
-	resultCh, err := s.verifier.VerifyUser("FIDO2 Authenticate: " + req.RPID)
-	if err != nil {
-		log.Printf("GetAssertion verifier err: %s", err)
-		token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
-		return
-	}
-	childCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
-	defer cancel()
-	select {
-	case result := <-resultCh:
-		if !result.OK {
-			if result.Error != nil {
-				log.Printf("GetAssertion verifier result err: %s", result.Error)
-			}
-			token.WriteCtap2Response(ctx, evt, statusForFailure(result), nil)
+	var authFlags byte
+	if requireUP {
+		resultCh, err := s.verifier.VerifyUser("FIDO2 Authenticate: " + req.RPID)
+		if err != nil {
+			log.Printf("GetAssertion verifier err: %s", err)
+			token.WriteCtap2Response(ctx, evt, ctap2.StatusOperationDenied, nil)
 			return
 		}
-	case <-childCtx.Done():
-		token.WriteCtap2Response(ctx, evt, ctap2.StatusUserActionTimeout, nil)
-		return
-	}
+		childCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
+		defer cancel()
+		select {
+		case result := <-resultCh:
+			if !result.OK {
+				if result.Error != nil {
+					log.Printf("GetAssertion verifier result err: %s", result.Error)
+				}
+				token.WriteCtap2Response(ctx, evt, statusForFailure(result), nil)
+				return
+			}
+		case <-childCtx.Done():
+			token.WriteCtap2Response(ctx, evt, ctap2.StatusUserActionTimeout, nil)
+			return
+		}
 
-	// authenticatorData: rpIdHash(32) | flags(1) | signCount(4)
-	// UV flag is set only when the verifier actually verified the user's identity.
-	authFlags := ctap2.AuthFlagUP
-	if s.verifier.PerformsUV() {
-		authFlags |= ctap2.AuthFlagUV
+		// authenticatorData: rpIdHash(32) | flags(1) | signCount(4)
+		// UV flag is set only when the verifier actually verified the user's identity.
+		authFlags = ctap2.AuthFlagUP
+		if s.verifier.PerformsUV() {
+			authFlags |= ctap2.AuthFlagUV
+		}
+	} else {
+		log.Printf("GetAssertion: silent pre-flight matched cred (%d bytes) for rp=%s", len(keyHandle), req.RPID)
 	}
 
 	var authDataBuf bytes.Buffer
@@ -826,7 +887,7 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 		2: authDataBytes,
 		3: sig,
 	}
-	if storedCred != nil {
+	if storedCred != nil && requireUP {
 		response[4] = map[string]interface{}{
 			"id":          storedCred.UserID,
 			"name":        storedCred.UserName,
@@ -843,5 +904,3 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 	log.Printf("GetAssertion ok: rp=%s", req.RPID)
 	token.WriteCtap2Response(ctx, evt, ctap2.StatusOK, encoded)
 }
-
-
