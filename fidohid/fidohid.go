@@ -142,9 +142,15 @@ func (t *SoftToken) Run(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			}
+		case CmdCancel:
+			// Per CTAPHID §11.2.9.1.4, CTAPHID_CANCEL has no response.
+			continue
+		case CmdPing:
+			_ = writeRespose(t.device, reqChanID, CmdPing, innerMsg, 0)
 		default:
 			log.Printf("unsuppoted cmd: %s %d", cmd, cmd)
-			writeRespose(t.device, reqChanID, cmd, nil, swInsNotSupported)
+			// Per CTAPHID §11.2.9.1.6, unknown HID commands return CmdError with ERR_INVALID_CMD (0x01).
+			_ = writeRespose(t.device, reqChanID, CmdError, []byte{0x01}, 0)
 		}
 	}
 }
@@ -158,14 +164,15 @@ const (
 	frameTypeInit = 0x80
 	frameTypeCont = 0x00
 
-	CmdPing  CmdType = 0x01 // Echo data through local processor only
-	CmdMsg   CmdType = 0x03 // Send U2F message frame
-	CmdLock  CmdType = 0x04 // Send lock channel command
-	CmdInit  CmdType = 0x06 // Channel initialization
-	CmdWink  CmdType = 0x08 // Send device identification wink
-	CmdCbor  CmdType = 0x10 // Send encapsulated CTAP CBOR
-	CmdSync  CmdType = 0x3c // Protocol resync command
-	CmdError CmdType = 0x3f // Error response
+	CmdPing   CmdType = 0x01 // Echo data through local processor only
+	CmdMsg    CmdType = 0x03 // Send U2F message frame
+	CmdLock   CmdType = 0x04 // Send lock channel command
+	CmdInit   CmdType = 0x06 // Channel initialization
+	CmdWink   CmdType = 0x08 // Send device identification wink
+	CmdCbor   CmdType = 0x10 // Send encapsulated CTAP CBOR
+	CmdCancel CmdType = 0x11 // Cancel outstanding requests (no response)
+	CmdSync   CmdType = 0x3c // Protocol resync command
+	CmdError  CmdType = 0x3f // Error response
 
 	vendorSpecificFirstCmd = 0x40
 	vendorSpecificLastCmd  = 0x7f
@@ -431,7 +438,7 @@ func newInitResponse(channelID uint32, nonce [8]byte) *initResponse {
 		MajorDeviceVersion: deviceMajor,
 		MinorDeviceVersion: deviceMinor,
 		BuildDeviceVersion: deviceBuild,
-		RawCapabilities: cborCapability,
+		RawCapabilities:    cborCapability,
 	}
 }
 
