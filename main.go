@@ -525,13 +525,72 @@ func (s *server) handleCtap2(ctx context.Context, token tokenResponder, evt fido
 	case ctap2.CmdGetInfo:
 		s.handleGetInfo(ctx, token, evt)
 	case ctap2.CmdMakeCredential:
-		s.handleMakeCredential(ctx, token, evt, payload)
+		kt, halt := withKeepalive(token, evt)
+		defer halt()
+		s.handleMakeCredential(ctx, kt, evt, payload)
 	case ctap2.CmdGetAssertion:
-		s.handleGetAssertion(ctx, token, evt, payload)
+		kt, halt := withKeepalive(token, evt)
+		defer halt()
+		s.handleGetAssertion(ctx, kt, evt, payload)
 	default:
 		log.Printf("unsupported CTAP2 cmd 0x%02x", cmd)
 		token.WriteCtap2Response(ctx, evt, ctap2.StatusNotAllowed, nil)
 	}
+}
+
+const keepaliveInterval = 100 * time.Millisecond
+
+// keepaliveWriter is implemented by *fidohid.SoftToken.
+type keepaliveWriter interface {
+	WriteKeepalive(evt fidohid.AuthEvent, status byte) error
+}
+
+// keepaliveResponder sends CTAPHID_KEEPALIVE frames until the first reply is
+// written. Without them, clients time out while the user scans a finger or
+// the TPM signs (CTAP 2.1 §11.2.9.1.4).
+type keepaliveResponder struct {
+	tokenResponder
+	stop chan struct{}
+	done chan struct{}
+	once sync.Once
+}
+
+// withKeepalive returns a responder that sends keepalives until the reply,
+// plus a halt func the caller must run once the handler returns.
+func withKeepalive(token tokenResponder, evt fidohid.AuthEvent) (tokenResponder, func()) {
+	kw, ok := token.(keepaliveWriter)
+	if !ok {
+		return token, func() {}
+	}
+	k := &keepaliveResponder{tokenResponder: token, stop: make(chan struct{}), done: make(chan struct{})}
+	go func() {
+		defer close(k.done)
+		t := time.NewTicker(keepaliveInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-k.stop:
+				return
+			case <-t.C:
+				if err := kw.WriteKeepalive(evt, fidohid.KeepaliveProcessing); err != nil {
+					log.Printf("keepalive write err: %s", err)
+				}
+			}
+		}
+	}()
+	return k, k.halt
+}
+
+// halt stops the keepalive loop and waits for it, so no keepalive frame can
+// interleave with or follow the reply.
+func (k *keepaliveResponder) halt() {
+	k.once.Do(func() { close(k.stop) })
+	<-k.done
+}
+
+func (k *keepaliveResponder) WriteCtap2Response(ctx context.Context, evt fidohid.AuthEvent, status byte, data []byte) error {
+	k.halt()
+	return k.tokenResponder.WriteCtap2Response(ctx, evt, status, data)
 }
 
 // handleGetInfo returns CTAP2 authenticator capabilities.
@@ -843,5 +902,3 @@ func (s *server) handleGetAssertion(ctx context.Context, token tokenResponder, e
 	log.Printf("GetAssertion ok: rp=%s", req.RPID)
 	token.WriteCtap2Response(ctx, evt, ctap2.StatusOK, encoded)
 }
-
-
