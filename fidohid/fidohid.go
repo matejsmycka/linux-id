@@ -158,14 +158,15 @@ const (
 	frameTypeInit = 0x80
 	frameTypeCont = 0x00
 
-	CmdPing  CmdType = 0x01 // Echo data through local processor only
-	CmdMsg   CmdType = 0x03 // Send U2F message frame
-	CmdLock  CmdType = 0x04 // Send lock channel command
-	CmdInit  CmdType = 0x06 // Channel initialization
-	CmdWink  CmdType = 0x08 // Send device identification wink
-	CmdCbor  CmdType = 0x10 // Send encapsulated CTAP CBOR
-	CmdSync  CmdType = 0x3c // Protocol resync command
-	CmdError CmdType = 0x3f // Error response
+	CmdPing      CmdType = 0x01 // Echo data through local processor only
+	CmdMsg       CmdType = 0x03 // Send U2F message frame
+	CmdLock      CmdType = 0x04 // Send lock channel command
+	CmdInit      CmdType = 0x06 // Channel initialization
+	CmdWink      CmdType = 0x08 // Send device identification wink
+	CmdCbor      CmdType = 0x10 // Send encapsulated CTAP CBOR
+	CmdKeepalive CmdType = 0x3b // Processing status while a request is pending
+	CmdSync      CmdType = 0x3c // Protocol resync command
+	CmdError     CmdType = 0x3f // Error response
 
 	vendorSpecificFirstCmd = 0x40
 	vendorSpecificLastCmd  = 0x7f
@@ -459,6 +460,16 @@ func (t *SoftToken) WriteResponse(ctx context.Context, evt AuthEvent, data []byt
 func (t *SoftToken) WriteCtap2Response(ctx context.Context, evt AuthEvent, status byte, data []byte) error {
 	payload := append([]byte{status}, data...)
 	return writeRespose(t.device, evt.chanID, CmdCbor, payload, 0)
+}
+
+// KeepaliveProcessing is the CTAPHID_KEEPALIVE status for "still working".
+const KeepaliveProcessing = byte(0x01)
+
+// WriteKeepalive sends a CTAPHID_KEEPALIVE frame on the request's channel.
+// Clients drop the device if it stays silent too long (Firefox on Linux
+// gives up after 2s), so long CTAP2 operations must send these periodically.
+func (t *SoftToken) WriteKeepalive(evt AuthEvent, status byte) error {
+	return writeRespose(t.device, evt.chanID, CmdKeepalive, []byte{status}, 0)
 }
 
 func writeRespose(d *uhid.Device, chanID uint32, cmd CmdType, data []byte, status uint16) error {

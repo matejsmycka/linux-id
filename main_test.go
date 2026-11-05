@@ -1859,3 +1859,60 @@ func TestCredStoreIsIsolatedToTempDir(t *testing.T) {
 		t.Fatalf("expected 1 cred, got %d (err=%v)", len(got), err)
 	}
 }
+
+// keepaliveRecorder logs keepalives and replies in order, from any goroutine.
+type keepaliveRecorder struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (r *keepaliveRecorder) WriteResponse(context.Context, fidohid.AuthEvent, []byte, uint16) error {
+	return nil
+}
+
+func (r *keepaliveRecorder) WriteCtap2Response(_ context.Context, _ fidohid.AuthEvent, status byte, _ []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, fmt.Sprintf("reply:0x%02x", status))
+	return nil
+}
+
+func (r *keepaliveRecorder) WriteKeepalive(_ fidohid.AuthEvent, status byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, fmt.Sprintf("keepalive:0x%02x", status))
+	return nil
+}
+
+// While the user is being verified, the authenticator must send keepalives;
+// otherwise Firefox on Linux drops the request after 2s. After the reply,
+// no more keepalives may follow.
+func TestHandleCtap2_SendsKeepaliveUntilReply(t *testing.T) {
+	gate := make(chan struct{})
+	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}, blockUntil: gate}
+	s := newTestServer(t, verifier, &fakePinentry{})
+
+	payload := makeMakeCredCBOR(t, "keepalive.example", "KA", "user", false, false)
+	rec := &keepaliveRecorder{}
+	go func() {
+		time.Sleep(5 * keepaliveInterval)
+		close(gate)
+	}()
+	s.handleCtap2(context.Background(), rec, fidohid.AuthEvent{RawCbor: append([]byte{ctap2.CmdMakeCredential}, payload...)})
+	time.Sleep(3 * keepaliveInterval)
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.events) < 3 {
+		t.Fatalf("events=%v, want keepalives before reply", rec.events)
+	}
+	last := rec.events[len(rec.events)-1]
+	if last != fmt.Sprintf("reply:0x%02x", ctap2.StatusOK) {
+		t.Fatalf("last event=%q, want OK reply last; events=%v", last, rec.events)
+	}
+	for _, e := range rec.events[:len(rec.events)-1] {
+		if e != "keepalive:0x01" {
+			t.Fatalf("unexpected event before reply: %q", e)
+		}
+	}
+}
