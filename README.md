@@ -85,9 +85,44 @@ To use fingerprint authentication, run:
 
 `fprintd` must be installed and your fingerprint enrolled via `fprintd-enroll`.
 
-### Resident credentials
+linux-id implements CTAP 2.1: pinUvAuthToken (PIN/UV auth protocols 1 and 2), authenticatorCredentialManagement, authenticatorSelection, authenticatorReset, and the `credProtect`, `hmac-secret` (WebAuthn PRF) and `hmac-secret-mc` extensions. It sends CTAPHID keepalives while waiting for you and stops waiting when the browser cancels.
 
-When a site requests `rk=true` (resident key), linux-id stores the credential locally at `~/.config/linux-id/creds.json`.
+### PIN
+
+The fingerprint is the everyday check; a CTAP PIN is the fallback when the finger is not recognised or the sensor is unavailable. Chrome's passkey management (Settings → Privacy and security → Security → Manage security keys) also requires one. Set it there, in Firefox's `about:webauthn`, or with `fido2-token -S <device>`.
+
+The PIN is a TPM object: a sealed object whose authorisation value is the PIN hash the browser sends. Checking a PIN means asking the TPM to unseal it, so the TPM's dictionary attack protection limits guesses, and nothing on disk lets anyone test a guess without the TPM. linux-id blocks the PIN after 8 wrong tries; the TPM's own lockout counter is shared with every other DA-protected TPM object on the machine.
+
+### Passkeys (resident credentials)
+
+Discoverable credentials are listed in `~/.config/linux-id/creds.json` (or the file given with `--credstore`): the credential ID, which wraps the TPM-protected private key, plus the site, user handle, name, display name and public key. Manage them from the browser, with `fido2-token -L -r <device>`, or locally:
+
+```bash
+linux-id creds list
+linux-id creds delete <id-prefix | rp-id>
+```
+
+A deleted credential also stops signing where a site still holds its ID.
+
+### Reset
+
+`linux-id reset`, or the browser's "reset security key" (within 10 seconds of linux-id starting: restart the service when the browser asks you to re-insert the key, then touch the sensor), retires every credential linux-id ever created, empties the passkey list and removes the PIN.
+
+Credential keys are bound to a credential generation: a TPM monotonic NV counter (index `0x013C1D01`) whose secret is derived inside the TPM each time it is needed. A reset increments the counter, so it cannot be undone. Credentials created by earlier linux-id versions keep working after upgrading, until the first reset retires them (recorded in NV index `0x013C1D02`).
+
+### ssh
+
+OpenSSH security keys work, including resident keys: `ssh-keygen -t ecdsa-sk -O resident -O verify-required`, and `ssh-keygen -K` to download them.
+
+### Options
+
+- `--auth fprintd|pinentry`: how the user is verified.
+- `--notify`: with fprintd, also show a desktop notification naming the site. Browsers show their own prompt, so it is off by default; it helps clients such as ssh.
+- `--credstore FILE`: where discoverable credentials and the PIN state are kept.
+
+### Tests
+
+`go test ./...` runs the unit tests; `LINUXID_TPM_TEST=1` adds tests against `/dev/tpmrm0` (they use their own NV indices and remove them). [`e2e/`](e2e/README.md) drives a throwaway instance over the real uhid transport with python-fido2 and OpenSSH.
 
 ## Future work
 

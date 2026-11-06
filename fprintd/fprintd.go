@@ -44,9 +44,13 @@ type Fprintd struct {
 
 func New() *Fprintd { return &Fprintd{} }
 
-// VerifyPresence starts a fingerprint scan. If one is already in progress,
-// returns the same result channel (deduplication for browser retries).
-func (f *Fprintd) VerifyPresence() (chan Result, error) {
+// VerifyPresence starts a fingerprint scan that is stopped when ctx is done.
+// onRetry, if not nil, is called from the scan's goroutine each time a finger
+// did not match and the scan starts another attempt.
+// If a scan is already in progress, returns the same result channel
+// (deduplication for browser retries); that scan keeps the context and
+// onRetry it was started with.
+func (f *Fprintd) VerifyPresence(ctx context.Context, onRetry func()) (chan Result, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -57,7 +61,7 @@ func (f *Fprintd) VerifyPresence() (chan Result, error) {
 	ch := make(chan Result, 1)
 	f.active = ch
 	go func() {
-		err := verifyFingerprint()
+		err := verifyFingerprint(ctx, onRetry)
 		result := Result{OK: err == nil, Error: err}
 		f.mu.Lock()
 		f.active = nil
@@ -67,7 +71,7 @@ func (f *Fprintd) VerifyPresence() (chan Result, error) {
 	return ch, nil
 }
 
-func verifyFingerprint() error {
+func verifyFingerprint(parent context.Context, onRetry func()) error {
 	conn, err := dbus.ConnectSystemBus()
 	if err != nil {
 		return err
@@ -110,18 +114,21 @@ func verifyFingerprint() error {
 	}
 	defer device.Call("net.reactivated.Fprint.Device.VerifyStop", 0)
 
-	ctx, cancel := context.WithTimeout(context.Background(), totalDeadline)
+	ctx, cancel := context.WithTimeout(parent, totalDeadline)
 	defer cancel()
 
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt > 1 {
 			log.Printf("fprintd: attempt %d/%d (previous: no-match), restarting verify", attempt, maxAttempts)
+			if onRetry != nil {
+				onRetry()
+			}
 			device.Call("net.reactivated.Fprint.Device.VerifyStop", 0)
 			select {
 			case <-time.After(attemptGap):
 			case <-ctx.Done():
-				return fmt.Errorf("fingerprint verification timed out")
+				return verifyAbandoned(ctx)
 			}
 			if err := device.Call("net.reactivated.Fprint.Device.VerifyStart", 0, "any").Err; err != nil {
 				return fmt.Errorf("VerifyStart on attempt %d: %w", attempt, err)
@@ -133,7 +140,7 @@ func verifyFingerprint() error {
 		select {
 		case <-time.After(settleDelay):
 		case <-ctx.Done():
-			return fmt.Errorf("fingerprint verification timed out")
+			return verifyAbandoned(ctx)
 		}
 		if dropped := drainSignals(sigCh); dropped > 0 {
 			log.Printf("fprintd: drained %d phantom signal(s) before attempt %d", dropped, attempt)
@@ -171,9 +178,17 @@ func waitForVerifyResult(ctx context.Context, sigCh <-chan *dbus.Signal) error {
 				return err
 			}
 		case <-ctx.Done():
-			return fmt.Errorf("fingerprint verification timed out")
+			return verifyAbandoned(ctx)
 		}
 	}
+}
+
+// verifyAbandoned reports why the scan stopped before a result arrived.
+func verifyAbandoned(ctx context.Context) error {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return fmt.Errorf("fingerprint verification cancelled: %w", ctx.Err())
+	}
+	return fmt.Errorf("fingerprint verification timed out: %w", context.DeadlineExceeded)
 }
 
 func processVerifyStatus(body []interface{}) (matched, terminal bool, err error) {

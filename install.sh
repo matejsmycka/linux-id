@@ -179,12 +179,20 @@ function install_unit_and_rules() {
 [Unit]
 Description=linux-id TPM service
 Documentation=https://github.com/matejsmycka/linux-id
+Wants=modprobe@uhid.service
+After=modprobe@uhid.service
 ConditionSecurity=tpm2
 ConditionKernelModuleLoaded=uhid
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/linux-id${auth_arg}
+# The uaccess ACLs on /dev/tpmrm0 and /dev/uhid are only granted once logind
+# marks the seat session active, which can be after the user manager starts
+# this unit. linux-id exits if the devices stay inaccessible; retry until the
+# session catches up.
+Restart=on-failure
+RestartSec=2s
 
 ProtectProc=noaccess
 # pinentry may need to access /run/user/\$UID/wayland-0
