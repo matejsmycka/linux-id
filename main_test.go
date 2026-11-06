@@ -20,7 +20,9 @@ import (
 	"github.com/matejsmycka/linux-id/ctap2"
 	"github.com/matejsmycka/linux-id/fidoauth"
 	"github.com/matejsmycka/linux-id/fidohid"
+	"github.com/matejsmycka/linux-id/memory"
 	"github.com/matejsmycka/linux-id/pinentry"
+	"github.com/matejsmycka/linux-id/pinuv"
 	"github.com/matejsmycka/linux-id/statuscode"
 )
 
@@ -81,11 +83,15 @@ type fakeVerifier struct {
 	nextResult VerifyResult
 	startErr   error
 	blockUntil chan struct{}
+	lastCtx    context.Context
+	lastReq    VerifyRequest
 }
 
-func (v *fakeVerifier) VerifyUser(prompt string) (<-chan VerifyResult, error) {
+func (v *fakeVerifier) VerifyUser(ctx context.Context, req VerifyRequest) (<-chan VerifyResult, error) {
+	v.lastCtx = ctx
+	v.lastReq = req
 	v.callCount++
-	v.prompts = append(v.prompts, prompt)
+	v.prompts = append(v.prompts, req.Prompt)
 	if v.startErr != nil {
 		return nil, v.startErr
 	}
@@ -107,17 +113,24 @@ func (v *fakeVerifier) PerformsUV() bool { return v.performsUV }
 // Bypasses the existing memory backend, which has a pre-existing bug where it
 // constructs an ecdsa.PrivateKey without setting X/Y on the public key — newer
 // Go (>=1.20) rejects that during ecdsa.SignASN1.
+// fakeSigner binds each key to the application parameter it was registered
+// for, as the TPM and memory backends do.
 type fakeSigner struct {
-	mu       sync.Mutex
-	keys     map[string]*ecdsa.PrivateKey // credID-as-string → key
-	counter  uint32
+	mu      sync.Mutex
+	keys    map[string]fakeKey // key handle → key
+	counter uint32
+}
+
+type fakeKey struct {
+	priv     *ecdsa.PrivateKey
+	appParam []byte
 }
 
 func newFakeSigner() *fakeSigner {
-	return &fakeSigner{keys: make(map[string]*ecdsa.PrivateKey)}
+	return &fakeSigner{keys: make(map[string]fakeKey)}
 }
 
-func (f *fakeSigner) RegisterKey(_ []byte) ([]byte, *big.Int, *big.Int, error) {
+func (f *fakeSigner) RegisterKey(appParam []byte) ([]byte, *big.Int, *big.Int, error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, nil, err
@@ -127,19 +140,19 @@ func (f *fakeSigner) RegisterKey(_ []byte) ([]byte, *big.Int, *big.Int, error) {
 		return nil, nil, nil, err
 	}
 	f.mu.Lock()
-	f.keys[string(credID)] = priv
+	f.keys[string(credID)] = fakeKey{priv: priv, appParam: append([]byte(nil), appParam...)}
 	f.mu.Unlock()
 	return credID, priv.PublicKey.X, priv.PublicKey.Y, nil
 }
 
-func (f *fakeSigner) SignASN1(keyHandle, _ []byte, digest []byte) ([]byte, error) {
+func (f *fakeSigner) SignASN1(keyHandle, appParam []byte, digest []byte) ([]byte, error) {
 	f.mu.Lock()
-	priv, ok := f.keys[string(keyHandle)]
+	k, ok := f.keys[string(keyHandle)]
 	f.mu.Unlock()
-	if !ok {
+	if !ok || !bytes.Equal(k.appParam, appParam) {
 		return nil, errors.New("unknown key handle")
 	}
-	return ecdsa.SignASN1(rand.Reader, priv, digest)
+	return ecdsa.SignASN1(rand.Reader, k.priv, digest)
 }
 
 func (f *fakeSigner) Counter() uint32 {
@@ -246,12 +259,32 @@ func (p *fakePinentry) release() {
 func newTestServer(t *testing.T, verifier UserVerifier, pe pinentryClient) *server {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
+	pu, err := pinuv.New()
+	if err != nil {
+		t.Fatal(err)
+	}
 	return &server{
 		pe:       pe,
 		verifier: verifier,
 		signer:   newFakeSigner(),
 		cs:       ctap2.NewCredStore(),
+		pinuv:    pu,
+		pin:      testPINStore(t),
+		gens:     testGenerations(t),
+		// started now, so authenticatorReset is accepted
+		startedAt: time.Now(),
 	}
+}
+
+// testGenerations is a memory backend's generation counter and secret
+// derivation, for servers whose signer is the fake.
+func testGenerations(t *testing.T) generationBackend {
+	t.Helper()
+	mem, err := memory.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mem
 }
 
 // rpIDHash returns sha256(rpID), the application parameter for a given RPID.
@@ -436,7 +469,7 @@ func TestCachingVerifier_CachesRecentSuccess(t *testing.T) {
 	inner := &fakeVerifier{nextResult: VerifyResult{OK: true}}
 	v := newCachingVerifier(inner)
 
-	ch1, err := v.VerifyUser("first")
+	ch1, err := v.VerifyUser(context.Background(), VerifyRequest{RPID: "rp.example", Prompt: "first"})
 	if err != nil {
 		t.Fatalf("first VerifyUser: %s", err)
 	}
@@ -447,7 +480,7 @@ func TestCachingVerifier_CachesRecentSuccess(t *testing.T) {
 		t.Fatalf("after first call, inner.callCount = %d, want 1", inner.callCount)
 	}
 
-	ch2, err := v.VerifyUser("second")
+	ch2, err := v.VerifyUser(context.Background(), VerifyRequest{RPID: "rp.example", Prompt: "second"})
 	if err != nil {
 		t.Fatalf("second VerifyUser: %s", err)
 	}
@@ -463,12 +496,12 @@ func TestCachingVerifier_DoesNotCacheFailure(t *testing.T) {
 	inner := &fakeVerifier{nextResult: VerifyResult{OK: false}}
 	v := newCachingVerifier(inner)
 
-	ch1, _ := v.VerifyUser("a")
+	ch1, _ := v.VerifyUser(context.Background(), VerifyRequest{RPID: "rp.example", Prompt: "a"})
 	if r := <-ch1; r.OK {
 		t.Fatalf("first result must not be OK; got %+v", r)
 	}
 
-	ch2, _ := v.VerifyUser("b")
+	ch2, _ := v.VerifyUser(context.Background(), VerifyRequest{RPID: "rp.example", Prompt: "b"})
 	if r := <-ch2; r.OK {
 		t.Errorf("second result must not be OK from cache after a failure; got %+v", r)
 	}
@@ -484,7 +517,7 @@ func TestCachingVerifier_CacheExpires(t *testing.T) {
 	now := time.Now()
 	v.now = func() time.Time { return now }
 
-	ch1, _ := v.VerifyUser("a")
+	ch1, _ := v.VerifyUser(context.Background(), VerifyRequest{RPID: "rp.example", Prompt: "a"})
 	<-ch1
 	if inner.callCount != 1 {
 		t.Fatalf("after first call, inner.callCount = %d, want 1", inner.callCount)
@@ -492,10 +525,48 @@ func TestCachingVerifier_CacheExpires(t *testing.T) {
 
 	now = now.Add(2 * uvCacheTTL)
 
-	ch2, _ := v.VerifyUser("b")
+	ch2, _ := v.VerifyUser(context.Background(), VerifyRequest{RPID: "rp.example", Prompt: "b"})
 	<-ch2
 	if inner.callCount != 2 {
 		t.Errorf("expired cache should not short-circuit; inner.callCount = %d, want 2", inner.callCount)
+	}
+}
+
+// A verification for one relying party must never be reused for another.
+func TestCachingVerifier_ScopedToRelyingParty(t *testing.T) {
+	inner := &fakeVerifier{nextResult: VerifyResult{OK: true}}
+	v := newCachingVerifier(inner)
+
+	<-mustVerify(t, v, VerifyRequest{RPID: "good.example"})
+	<-mustVerify(t, v, VerifyRequest{RPID: "evil.example"})
+	if inner.callCount != 2 {
+		t.Errorf("verification reused across relying parties; inner.callCount = %d, want 2", inner.callCount)
+	}
+
+	// Requests without a relying party (authenticatorSelection) never hit.
+	<-mustVerify(t, v, VerifyRequest{})
+	<-mustVerify(t, v, VerifyRequest{})
+	if inner.callCount != 4 {
+		t.Errorf("RP-less request served from cache; inner.callCount = %d, want 4", inner.callCount)
+	}
+}
+
+func mustVerify(t *testing.T, v UserVerifier, req VerifyRequest) <-chan VerifyResult {
+	t.Helper()
+	ch, err := v.VerifyUser(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ch
+}
+
+func TestCachingVerifier_FreshRequestBypassesCache(t *testing.T) {
+	inner := &fakeVerifier{nextResult: VerifyResult{OK: true}}
+	v := newCachingVerifier(inner)
+	<-mustVerify(t, v, VerifyRequest{RPID: "rp.example"})
+	<-mustVerify(t, v, VerifyRequest{RPID: "rp.example", Fresh: true})
+	if inner.callCount != 2 {
+		t.Errorf("fresh request served from cache; inner.callCount = %d, want 2", inner.callCount)
 	}
 }
 
@@ -627,7 +698,8 @@ func TestGetAssertion_AuthFlagsHonest(t *testing.T) {
 // "id", "name", "displayName" — not integer keys. Catches the PR's int-key
 // schema regression.
 func TestGetAssertion_UserEntityUsesStringKeys(t *testing.T) {
-	verifier := &fakeVerifier{nextResult: VerifyResult{OK: true}}
+	// UV, so the user entity carries name and displayName.
+	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
 	s := newTestServer(t, verifier, &fakePinentry{})
 	// Register a resident credential so handleGetAssertion will populate field 4.
 	registerCred(t, s, "passkey.example.com", "Passkey Demo", "dave", true /*rk*/)
@@ -666,7 +738,8 @@ func TestGetAssertion_UserEntityUsesStringKeys(t *testing.T) {
 // cbor.Marshal does NOT sort, so this test catches any regression that
 // removes the dedicated CTAP2EncOptions encoder.
 func TestGetAssertion_ResponseIsCanonicalCBOR(t *testing.T) {
-	verifier := &fakeVerifier{nextResult: VerifyResult{OK: true}}
+	// UV, so the user entity carries name and displayName.
+	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
 	s := newTestServer(t, verifier, &fakePinentry{})
 	registerCred(t, s, "canonical.example", "Canonical", "user", true)
 
@@ -1547,7 +1620,7 @@ func TestRealWorld_AWSLegacyU2FAuth(t *testing.T) {
 	// Register a U2F credential first via the in-memory signer directly
 	// (handleRegister also uses pinentry, this is simpler).
 	appParam := rpIDHash("u2f.aws.amazon.com")
-	keyHandle, _, _, err := s.signer.RegisterKey(appParam[:])
+	keyHandle, _, _, err := s.newCredential(appParam[:], credOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1601,7 +1674,7 @@ func TestRealWorld_U2FBrowserPollingDedup(t *testing.T) {
 	s := newTestServer(t, verifier, pe)
 
 	appParam := rpIDHash("github.com")
-	keyHandle, _, _, _ := s.signer.RegisterKey(appParam[:])
+	keyHandle, _, _, _ := s.newCredential(appParam[:], credOptions{})
 	challenge := sha256.Sum256([]byte("retry-challenge"))
 	authReq := &fidoauth.AuthenticatorRequest{
 		Command: fidoauth.CmdAuthenticate,
@@ -1660,7 +1733,7 @@ func TestRealWorld_U2FUserCancel(t *testing.T) {
 	s := newTestServer(t, verifier, pe)
 
 	appParam := rpIDHash("vault.bitwarden.com")
-	keyHandle, _, _, _ := s.signer.RegisterKey(appParam[:])
+	keyHandle, _, _, _ := s.newCredential(appParam[:], credOptions{})
 	authReq := &fidoauth.AuthenticatorRequest{
 		Command: fidoauth.CmdAuthenticate,
 		Authenticate: &fidoauth.AuthenticatorAuthReq{
@@ -1686,7 +1759,7 @@ func TestRealWorld_U2FCheckOnly(t *testing.T) {
 	s := newTestServer(t, verifier, pe)
 
 	appParam := rpIDHash("u2f.bin.coffee")
-	keyHandle, _, _, _ := s.signer.RegisterKey(appParam[:])
+	keyHandle, _, _, _ := s.newCredential(appParam[:], credOptions{})
 	authReq := &fidoauth.AuthenticatorRequest{
 		Command: fidoauth.CmdAuthenticate,
 		Authenticate: &fidoauth.AuthenticatorAuthReq{
@@ -1857,5 +1930,36 @@ func TestCredStoreIsIsolatedToTempDir(t *testing.T) {
 	got, err := cs.FindByRPID([]byte("r"))
 	if err != nil || len(got) != 1 {
 		t.Fatalf("expected 1 cred, got %d (err=%v)", len(got), err)
+	}
+}
+
+// TestGetAssertion_HostCancel asserts that a CTAPHID_CANCEL (which cancels the
+// request context) while waiting for the user is answered with
+// CTAP2_ERR_KEEPALIVE_CANCEL rather than a timeout, and that the verifier
+// sees the cancellation so it can stop the fingerprint scan.
+func TestGetAssertion_HostCancel(t *testing.T) {
+	verifier := &fakeVerifier{performsUV: true, nextResult: VerifyResult{OK: true}}
+	s := newTestServer(t, verifier, &fakePinentry{})
+	credID := registerCred(t, s, "cancel.example.com", "Cancel", "user", false)
+
+	gate := make(chan struct{})
+	verifier.blockUntil = gate
+	defer close(gate)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(20*time.Millisecond, cancel)
+
+	resp := &fakeResponder{}
+	payload := makeAssertionCBOR(t, "cancel.example.com",
+		[]ctap2.CredDescriptor{{Type: "public-key", ID: credID}},
+		nil)
+	s.handleGetAssertion(ctx, resp, fidohid.AuthEvent{}, payload)
+
+	if got := resp.lastCtap2().status; got != ctap2.StatusKeepaliveCancel {
+		t.Fatalf("expected StatusKeepaliveCancel (0x%02x), got 0x%02x",
+			ctap2.StatusKeepaliveCancel, got)
+	}
+	if verifier.lastCtx == nil || verifier.lastCtx.Err() == nil {
+		t.Fatal("verifier context was not cancelled")
 	}
 }

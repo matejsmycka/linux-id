@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"math/big"
+	"sync"
 
 	"golang.org/x/crypto/chacha20poly1305"
 )
@@ -14,11 +15,16 @@ import (
 type Mem struct {
 	masterPrivateKey []byte
 	signCounter      uint32
+	secretKey        []byte // DeriveSecret's HMAC key
+	genMu            sync.Mutex
+	generation       uint64 // credential generation counter
+	legacyRetired    bool
 }
 
 func New() (*Mem, error) {
 	return &Mem{
 		masterPrivateKey: mustRand(chacha20poly1305.KeySize),
+		secretKey:        mustRand(32),
 	}, nil
 }
 
