@@ -181,10 +181,16 @@ Description=linux-id TPM service
 Documentation=https://github.com/matejsmycka/linux-id
 ConditionSecurity=tpm2
 ConditionKernelModuleLoaded=uhid
+# No restart rate limit: never give up on the udev uaccess race at boot
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/linux-id${auth_arg}
+
+# Retry until udev applies the uaccess ACL on /dev/tpmrm0 and /dev/uhid
+Restart=on-failure
+RestartSec=1s
 
 ProtectProc=noaccess
 # pinentry may need to access /run/user/\$UID/wayland-0
